@@ -139,6 +139,11 @@ func DefaultSystemConfig(t testing.TB) SystemConfig {
 					SequencerConfDepth: 0,
 					SequencerEnabled:   false,
 				},
+				RPC: rollupNode.RPCConfig{
+					ListenAddr:  "127.0.0.1",
+					ListenPort:  0,
+					EnableAdmin: true,
+				},
 				L1EpochPollInterval:         time.Second * 4,
 				RuntimeConfigReloadInterval: time.Minute * 10,
 				ConfigPersistence:           &rollupNode.DisabledConfigPersistence{},
@@ -689,9 +694,6 @@ func (cfg SystemConfig) Start(t *testing.T, _opts ...SystemConfigOption) (*Syste
 		}
 	}
 
-	// Don't log state snapshots in test output
-	snapLog := log.NewLogger(log.DiscardHandler())
-
 	// Rollup nodes
 
 	// Ensure we are looping through the nodes in alphabetical order
@@ -732,7 +734,7 @@ func (cfg SystemConfig) Start(t *testing.T, _opts ...SystemConfigOption) (*Syste
 				l.Warn("closed op-node!")
 			}()
 		}
-		node, err := rollupNode.New(context.Background(), &c, l, snapLog, "", metrics.NewMetrics(""))
+		node, err := rollupNode.New(context.Background(), &c, l, "", metrics.NewMetrics(""))
 		if err != nil {
 			return nil, err
 		}
@@ -861,11 +863,13 @@ func (cfg SystemConfig) Start(t *testing.T, _opts ...SystemConfigOption) (*Syste
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup batch submitter: %w", err)
 	}
+	sys.BatchSubmitter = batcher
+	if action, ok := opts.Get("beforeBatcherStart", ""); ok {
+		action(&cfg, sys)
+	}
 	if err := batcher.Start(context.Background()); err != nil {
 		return nil, errors.Join(fmt.Errorf("failed to start batch submitter: %w", err), batcher.Stop(context.Background()))
 	}
-	sys.BatchSubmitter = batcher
-
 	return sys, nil
 }
 

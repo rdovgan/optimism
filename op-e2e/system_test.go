@@ -765,7 +765,6 @@ func TestSystemP2PAltSync(t *testing.T) {
 
 	// set up our syncer node, connect it to alice/bob
 	cfg.Loggers["syncer"] = testlog.Logger(t, log.LevelInfo).New("role", "syncer")
-	snapLog := log.NewLogger(log.DiscardHandler())
 
 	// Create a peer, and hook up alice and bob
 	h, err := sys.newMockNetPeer()
@@ -803,7 +802,7 @@ func TestSystemP2PAltSync(t *testing.T) {
 
 	configureL2(syncNodeCfg, syncerL2Engine, cfg.JWTSecret)
 
-	syncerNode, err := rollupNode.New(ctx, syncNodeCfg, cfg.Loggers["syncer"], snapLog, "", metrics.NewMetrics(""))
+	syncerNode, err := rollupNode.New(ctx, syncNodeCfg, cfg.Loggers["syncer"], "", metrics.NewMetrics(""))
 	require.NoError(t, err)
 	err = syncerNode.Start(ctx)
 	require.NoError(t, err)
@@ -1421,9 +1420,7 @@ func StopStartBatcher(t *testing.T, deltaTimeOffset *hexutil.Uint64) {
 	require.NoError(t, err, "Error starting up system")
 	defer sys.Close()
 
-	rollupRPCClient, err := rpc.DialContext(context.Background(), sys.RollupNodes["verifier"].HTTPEndpoint())
-	require.NoError(t, err)
-	rollupClient := sources.NewRollupClient(client.NewBaseRPCClient(rollupRPCClient))
+	rollupClient := sys.RollupClient("verifier")
 
 	l2Seq := sys.Clients["sequencer"]
 	l2Verif := sys.Clients["verifier"]
@@ -1457,8 +1454,9 @@ func StopStartBatcher(t *testing.T, deltaTimeOffset *hexutil.Uint64) {
 	require.NoError(t, err)
 	require.Greater(t, newSeqStatus.SafeL2.Number, seqStatus.SafeL2.Number, "Safe chain did not advance")
 
+	driver := sys.BatchSubmitter.TestDriver()
 	// stop the batch submission
-	err = sys.BatchSubmitter.Driver().StopBatchSubmitting(context.Background())
+	err = driver.StopBatchSubmitting(context.Background())
 	require.NoError(t, err)
 
 	// wait for any old safe blocks being submitted / derived
@@ -1478,7 +1476,7 @@ func StopStartBatcher(t *testing.T, deltaTimeOffset *hexutil.Uint64) {
 	require.Equal(t, newSeqStatus.SafeL2.Number, seqStatus.SafeL2.Number, "Safe chain advanced while batcher was stopped")
 
 	// start the batch submission
-	err = sys.BatchSubmitter.Driver().StartBatchSubmitting()
+	err = driver.StartBatchSubmitting()
 	require.NoError(t, err)
 	time.Sleep(safeBlockInclusionDuration)
 
@@ -1520,7 +1518,8 @@ func TestBatcherMultiTx(t *testing.T) {
 	require.NoError(t, err)
 
 	// start batch submission
-	err = sys.BatchSubmitter.Driver().StartBatchSubmitting()
+	driver := sys.BatchSubmitter.TestDriver()
+	err = driver.StartBatchSubmitting()
 	require.NoError(t, err)
 
 	totalTxCount := 0

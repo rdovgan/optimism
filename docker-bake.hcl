@@ -26,7 +26,7 @@ variable "IMAGE_TAGS" {
 
 variable "PLATFORMS" {
   // You can override this as "linux/amd64,linux/arm64".
-  // Only a specify a single platform when `--load` ing into docker.
+  // Only specify a single platform when `--load` ing into docker.
   // Multi-platform is supported when outputting to disk or pushing to a registry.
   // Multi-platform builds can be tested locally with:  --set="*.output=type=image,push=false"
   default = ""
@@ -58,6 +58,10 @@ variable "OP_HEARTBEAT_VERSION" {
 }
 
 variable "OP_PROGRAM_VERSION" {
+  default = "${GIT_VERSION}"
+}
+
+variable "OP_SUPERVISOR_VERSION" {
   default = "${GIT_VERSION}"
 }
 
@@ -184,6 +188,19 @@ target "op-program" {
   target = "op-program-target"
   platforms = split(",", PLATFORMS)
   tags = [for tag in split(",", IMAGE_TAGS) : "${REGISTRY}/${REPOSITORY}/op-program:${tag}"]
+}
+
+target "op-supervisor" {
+  dockerfile = "ops/docker/op-stack-go/Dockerfile"
+  context = "."
+  args = {
+    GIT_COMMIT = "${GIT_COMMIT}"
+    GIT_DATE = "${GIT_DATE}"
+    OP_SUPERVISOR_VERSION = "${OP_SUPERVISOR_VERSION}"
+  }
+  target = "op-supervisor-target"
+  platforms = split(",", PLATFORMS)
+  tags = [for tag in split(",", IMAGE_TAGS) : "${REGISTRY}/${REPOSITORY}/op-supervisor:${tag}"]
 }
 
 target "cannon" {
