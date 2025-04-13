@@ -13,6 +13,8 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
 
+var ErrEngineResetReq = errors.New("cannot continue derivation until Engine has been reset")
+
 type Metrics interface {
 	RecordL1Ref(name string, ref eth.L1BlockRef)
 	RecordL2Ref(name string, ref eth.L2BlockRef)
@@ -38,6 +40,17 @@ type ResettableStage interface {
 	Reset(ctx context.Context, base eth.L1BlockRef, baseCfg eth.SystemConfig) error
 }
 
+// A ChannelFlusher flushes all internal state related to the current channel and then
+// calls FlushChannel on the stage it owns. Note that this is in contrast to Reset, which
+// is called by the owning Pipeline in a loop over all stages.
+type ChannelFlusher interface {
+	FlushChannel()
+}
+
+type ForkTransformer interface {
+	Transform(rollup.ForkName)
+}
+
 type L2Source interface {
 	PayloadByHash(context.Context, common.Hash) (*eth.ExecutionPayloadEnvelope, error)
 	PayloadByNumber(context.Context, uint64) (*eth.ExecutionPayloadEnvelope, error)
@@ -47,12 +60,18 @@ type L2Source interface {
 	SystemConfigL2Fetcher
 }
 
+type l1TraversalStage interface {
+	NextBlockProvider
+	ResettableStage
+	AdvanceL1Block(ctx context.Context) error
+}
+
 // DerivationPipeline is updated with new L1 data, and the Step() function can be iterated on to generate attributes
 type DerivationPipeline struct {
 	log       log.Logger
 	rollupCfg *rollup.Config
 	l1Fetcher L1Fetcher
-	plasma    PlasmaInputFetcher
+	altDA     AltDAInputFetcher
 
 	l2 L2Source
 
@@ -62,7 +81,7 @@ type DerivationPipeline struct {
 	stages    []ResettableStage
 
 	// Special stages to keep track of
-	traversal *L1Traversal
+	traversal l1TraversalStage
 
 	attrib *AttributesQueue
 
@@ -77,29 +96,36 @@ type DerivationPipeline struct {
 
 // NewDerivationPipeline creates a DerivationPipeline, to turn L1 data into L2 block-inputs.
 func NewDerivationPipeline(log log.Logger, rollupCfg *rollup.Config, l1Fetcher L1Fetcher, l1Blobs L1BlobsFetcher,
-	plasma PlasmaInputFetcher, l2Source L2Source, metrics Metrics) *DerivationPipeline {
-
-	// Pull stages
-	l1Traversal := NewL1Traversal(log, rollupCfg, l1Fetcher)
-	dataSrc := NewDataSourceFactory(log, rollupCfg, l1Fetcher, l1Blobs, plasma) // auxiliary stage for L1Retrieval
+	altDA AltDAInputFetcher, l2Source L2Source, metrics Metrics, managedMode bool,
+) *DerivationPipeline {
+	spec := rollup.NewChainSpec(rollupCfg)
+	// Stages are strung together into a pipeline,
+	// results are pulled from the stage closed to the L2 engine, which pulls from the previous stage, and so on.
+	var l1Traversal l1TraversalStage
+	if managedMode {
+		l1Traversal = NewL1TraversalManaged(log, rollupCfg, l1Fetcher)
+	} else {
+		l1Traversal = NewL1Traversal(log, rollupCfg, l1Fetcher)
+	}
+	dataSrc := NewDataSourceFactory(log, rollupCfg, l1Fetcher, l1Blobs, altDA) // auxiliary stage for L1Retrieval
 	l1Src := NewL1Retrieval(log, dataSrc, l1Traversal)
-	frameQueue := NewFrameQueue(log, l1Src)
-	bank := NewChannelBank(log, rollupCfg, frameQueue, l1Fetcher, metrics)
-	chInReader := NewChannelInReader(rollupCfg, log, bank, metrics)
-	batchQueue := NewBatchQueue(log, rollupCfg, chInReader, l2Source)
+	frameQueue := NewFrameQueue(log, rollupCfg, l1Src)
+	channelMux := NewChannelMux(log, spec, frameQueue, metrics)
+	chInReader := NewChannelInReader(rollupCfg, log, channelMux, metrics)
+	batchMux := NewBatchMux(log, rollupCfg, chInReader, l2Source)
 	attrBuilder := NewFetchingAttributesBuilder(rollupCfg, l1Fetcher, l2Source)
-	attributesQueue := NewAttributesQueue(log, rollupCfg, attrBuilder, batchQueue)
+	attributesQueue := NewAttributesQueue(log, rollupCfg, attrBuilder, batchMux)
 
 	// Reset from ResetEngine then up from L1 Traversal. The stages do not talk to each other during
 	// the ResetEngine, but after the ResetEngine, this is the order in which the stages could talk to each other.
 	// Note: The ResetEngine is the only reset that can fail.
-	stages := []ResettableStage{l1Traversal, l1Src, plasma, frameQueue, bank, chInReader, batchQueue, attributesQueue}
+	stages := []ResettableStage{l1Traversal, l1Src, altDA, frameQueue, channelMux, chInReader, batchMux, attributesQueue}
 
 	return &DerivationPipeline{
 		log:       log,
 		rollupCfg: rollupCfg,
 		l1Fetcher: l1Fetcher,
-		plasma:    plasma,
+		altDA:     altDA,
 		resetting: 0,
 		stages:    stages,
 		metrics:   metrics,
@@ -120,6 +146,10 @@ func (dp *DerivationPipeline) Reset() {
 	dp.resetSysConfig = eth.SystemConfig{}
 	dp.resetL2Safe = eth.L2BlockRef{}
 	dp.engineIsReset = false
+}
+
+func (dp *DerivationPipeline) DepositsOnlyAttributes(parent eth.BlockID, derivedFrom eth.L1BlockRef) (*AttributesWithParent, error) {
+	return dp.attrib.DepositsOnlyAttributes(parent, derivedFrom)
 }
 
 // Origin is the L1 block of the inner-most stage of the derivation pipeline,
@@ -147,7 +177,7 @@ func (dp *DerivationPipeline) Step(ctx context.Context, pendingSafeHead eth.L2Bl
 	// if any stages need to be reset, do that first.
 	if dp.resetting < len(dp.stages) {
 		if !dp.engineIsReset {
-			return nil, NewResetError(errors.New("cannot continue derivation until Engine has been reset"))
+			return nil, NewResetError(ErrEngineResetReq)
 		}
 
 		// After the Engine has been reset to ensure it is derived from the canonical L1 chain,
@@ -177,6 +207,7 @@ func (dp *DerivationPipeline) Step(ctx context.Context, pendingSafeHead eth.L2Bl
 		if err := VerifyNewL1Origin(ctx, prevOrigin, dp.l1Fetcher, newOrigin); err != nil {
 			return nil, fmt.Errorf("failed to verify L1 origin transition: %w", err)
 		}
+		dp.transformStages(prevOrigin, newOrigin)
 		dp.origin = newOrigin
 	}
 
@@ -197,29 +228,36 @@ func (dp *DerivationPipeline) initialReset(ctx context.Context, resetL2Safe eth.
 	dp.log.Info("Rewinding derivation-pipeline L1 traversal to handle reset")
 
 	dp.metrics.RecordPipelineReset()
+	spec := rollup.NewChainSpec(dp.rollupCfg)
 
 	// Walk back L2 chain to find the L1 origin that is old enough to start buffering channel data from.
 	pipelineL2 := resetL2Safe
 	l1Origin := resetL2Safe.L1Origin
+
+	pipelineOrigin, err := dp.l1Fetcher.L1BlockRefByHash(ctx, l1Origin.Hash)
+	if err != nil {
+		return NewTemporaryError(fmt.Errorf("failed to fetch the new L1 progress: origin: %s; err: %w", pipelineL2.L1Origin, err))
+	}
+
 	for {
 		afterL2Genesis := pipelineL2.Number > dp.rollupCfg.Genesis.L2.Number
 		afterL1Genesis := pipelineL2.L1Origin.Number > dp.rollupCfg.Genesis.L1.Number
-		afterChannelTimeout := pipelineL2.L1Origin.Number+dp.rollupCfg.ChannelTimeout > l1Origin.Number
+		afterChannelTimeout := pipelineL2.L1Origin.Number+spec.ChannelTimeout(pipelineOrigin.Time) > l1Origin.Number
 		if afterL2Genesis && afterL1Genesis && afterChannelTimeout {
 			parent, err := dp.l2.L2BlockRefByHash(ctx, pipelineL2.ParentHash)
 			if err != nil {
 				return NewResetError(fmt.Errorf("failed to fetch L2 parent block %s", pipelineL2.ParentID()))
 			}
 			pipelineL2 = parent
+			pipelineOrigin, err = dp.l1Fetcher.L1BlockRefByHash(ctx, pipelineL2.L1Origin.Hash)
+			if err != nil {
+				return NewTemporaryError(fmt.Errorf("failed to fetch the new L1 progress: origin: %s; err: %w", pipelineL2.L1Origin, err))
+			}
 		} else {
 			break
 		}
 	}
 
-	pipelineOrigin, err := dp.l1Fetcher.L1BlockRefByHash(ctx, pipelineL2.L1Origin.Hash)
-	if err != nil {
-		return NewTemporaryError(fmt.Errorf("failed to fetch the new L1 progress: origin: %s; err: %w", pipelineL2.L1Origin, err))
-	}
 	sysCfg, err := dp.l2.SystemConfigByL2Hash(ctx, pipelineL2.Hash)
 	if err != nil {
 		return NewTemporaryError(fmt.Errorf("failed to fetch L1 config of L2 block %s: %w", pipelineL2.ID(), err))
@@ -229,6 +267,20 @@ func (dp *DerivationPipeline) initialReset(ctx context.Context, resetL2Safe eth.
 	dp.resetSysConfig = sysCfg
 	dp.resetL2Safe = resetL2Safe
 	return nil
+}
+
+func (db *DerivationPipeline) transformStages(oldOrigin, newOrigin eth.L1BlockRef) {
+	fork := db.rollupCfg.IsActivationBlock(oldOrigin.Time, newOrigin.Time)
+	if fork == "" {
+		return
+	}
+
+	db.log.Info("Transforming stages", "fork", fork)
+	for _, stage := range db.stages {
+		if tf, ok := stage.(ForkTransformer); ok {
+			tf.Transform(fork)
+		}
+	}
 }
 
 func (dp *DerivationPipeline) ConfirmEngineReset() {

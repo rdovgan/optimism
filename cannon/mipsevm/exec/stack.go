@@ -5,11 +5,10 @@ import (
 	"fmt"
 
 	"github.com/ethereum-optimism/optimism/cannon/mipsevm"
-	"github.com/ethereum-optimism/optimism/cannon/mipsevm/program"
 )
 
 type StackTracker interface {
-	PushStack(target uint32)
+	PushStack(caller Word, target Word)
 	PopStack()
 }
 
@@ -20,7 +19,7 @@ type TraceableStackTracker interface {
 
 type NoopStackTracker struct{}
 
-func (n *NoopStackTracker) PushStack(target uint32) {}
+func (n *NoopStackTracker) PushStack(caller Word, target Word) {}
 
 func (n *NoopStackTracker) PopStack() {}
 
@@ -29,21 +28,26 @@ func (n *NoopStackTracker) Traceback() {}
 type StackTrackerImpl struct {
 	state mipsevm.FPVMState
 
-	stack  []uint32
-	caller []uint32
-	meta   *program.Metadata
+	stack  []Word
+	caller []Word
+	meta   mipsevm.Metadata
 }
 
-func NewStackTracker(state mipsevm.FPVMState, meta *program.Metadata) (*StackTrackerImpl, error) {
+func NewStackTracker(state mipsevm.FPVMState, meta mipsevm.Metadata) (*StackTrackerImpl, error) {
 	if meta == nil {
 		return nil, errors.New("metadata is nil")
 	}
-	return &StackTrackerImpl{state: state}, nil
+	return NewStackTrackerUnsafe(state, meta), nil
 }
 
-func (s *StackTrackerImpl) PushStack(target uint32) {
+// NewStackTrackerUnsafe creates a new TraceableStackTracker without verifying meta is not nil
+func NewStackTrackerUnsafe(state mipsevm.FPVMState, meta mipsevm.Metadata) *StackTrackerImpl {
+	return &StackTrackerImpl{state: state, meta: meta}
+}
+
+func (s *StackTrackerImpl) PushStack(caller Word, target Word) {
+	s.caller = append(s.caller, caller)
 	s.stack = append(s.stack, target)
-	s.caller = append(s.caller, s.state.GetPC())
 }
 
 func (s *StackTrackerImpl) PopStack() {

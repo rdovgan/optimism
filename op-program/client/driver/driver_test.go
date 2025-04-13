@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -11,6 +12,8 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup/event"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
 )
+
+var mockErr = errors.New("mock error")
 
 type fakeEnd struct {
 	closing bool
@@ -21,8 +24,8 @@ func (d *fakeEnd) Closing() bool {
 	return d.closing
 }
 
-func (d *fakeEnd) Result() error {
-	return d.result
+func (d *fakeEnd) Result() (eth.L2BlockRef, error) {
+	return eth.L2BlockRef{}, d.result
 }
 
 func TestDriver(t *testing.T) {
@@ -44,16 +47,17 @@ func TestDriver(t *testing.T) {
 		d := newTestDriver(t, func(d *Driver, end *fakeEnd, ev event.Event) {
 			end.closing = true
 		})
-		require.NoError(t, d.RunComplete())
+		_, err := d.RunComplete()
+		require.NoError(t, err)
 	})
 
 	t.Run("insta error", func(t *testing.T) {
-		mockErr := errors.New("mock error")
 		d := newTestDriver(t, func(d *Driver, end *fakeEnd, ev event.Event) {
 			end.closing = true
 			end.result = mockErr
 		})
-		require.ErrorIs(t, mockErr, d.RunComplete())
+		_, err := d.RunComplete()
+		require.ErrorIs(t, mockErr, err)
 	})
 
 	t.Run("success after a few events", func(t *testing.T) {
@@ -66,12 +70,12 @@ func TestDriver(t *testing.T) {
 			count += 1
 			d.Emit(TestEvent{})
 		})
-		require.NoError(t, d.RunComplete())
+		_, err := d.RunComplete()
+		require.NoError(t, err)
 	})
 
 	t.Run("error after a few events", func(t *testing.T) {
 		count := 0
-		mockErr := errors.New("mock error")
 		d := newTestDriver(t, func(d *Driver, end *fakeEnd, ev event.Event) {
 			if count > 3 {
 				end.closing = true
@@ -81,7 +85,8 @@ func TestDriver(t *testing.T) {
 			count += 1
 			d.Emit(TestEvent{})
 		})
-		require.ErrorIs(t, mockErr, d.RunComplete())
+		_, err := d.RunComplete()
+		require.ErrorIs(t, mockErr, err)
 	})
 
 	t.Run("exhaust events", func(t *testing.T) {
@@ -92,7 +97,9 @@ func TestDriver(t *testing.T) {
 			}
 			count += 1
 		})
-		require.ErrorIs(t, ExhaustErr, d.RunComplete())
+		// No further processing to be done so evaluate if the claims output root is correct.
+		_, err := d.RunComplete()
+		require.NoError(t, err)
 	})
 
 	t.Run("queued events", func(t *testing.T) {
@@ -104,7 +111,8 @@ func TestDriver(t *testing.T) {
 			}
 			count += 1
 		})
-		require.ErrorIs(t, ExhaustErr, d.RunComplete())
+		_, err := d.RunComplete()
+		require.NoError(t, err)
 		// add 1 for initial event that RunComplete fires
 		require.Equal(t, 1+3*2, count, "must have queued up 2 events 3 times")
 	})

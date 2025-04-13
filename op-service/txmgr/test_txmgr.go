@@ -40,7 +40,7 @@ func (m *TestTxManager) WaitOnJammingTx(ctx context.Context) error {
 }
 
 func (m *TestTxManager) makeStuckTx(ctx context.Context, candidate TxCandidate) (*types.Transaction, error) {
-	gasTipCap, _, blobBaseFee, err := m.suggestGasPriceCaps(ctx)
+	gasTipCap, _, blobBaseFee, err := m.SuggestGasPriceCaps(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (m *TestTxManager) makeStuckTx(ctx context.Context, candidate TxCandidate) 
 
 	var txMessage types.TxData
 	if sidecar != nil {
-		blobFeeCap := calcBlobFeeCap(blobBaseFee)
+		blobFeeCap := m.calcBlobFeeCap(blobBaseFee)
 		message := &types.BlobTx{
 			To:         *candidate.To,
 			Data:       candidate.TxData,

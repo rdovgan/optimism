@@ -23,8 +23,14 @@ const (
 	ProxyAdmin                    = "0x4200000000000000000000000000000000000018"
 	BaseFeeVault                  = "0x4200000000000000000000000000000000000019"
 	L1FeeVault                    = "0x420000000000000000000000000000000000001a"
+	OperatorFeeVault              = "0x420000000000000000000000000000000000001b"
 	SchemaRegistry                = "0x4200000000000000000000000000000000000020"
 	EAS                           = "0x4200000000000000000000000000000000000021"
+	CrossL2Inbox                  = "0x4200000000000000000000000000000000000022"
+	L2toL2CrossDomainMessenger    = "0x4200000000000000000000000000000000000023"
+	SuperchainETHBridge           = "0x4200000000000000000000000000000000000024"
+	ETHLiquidity                  = "0x4200000000000000000000000000000000000025"
+	SuperchainTokenBridge         = "0x4200000000000000000000000000000000000028"
 	Create2Deployer               = "0x13b0D85CcB8bf860b6b79AF3029fCA081AE9beF2"
 	MultiCall3                    = "0xcA11bde05977b3631167028862bE2a173976CA11"
 	Safe_v130                     = "0x69f4D1788e39c87893C980c06EdF4b7f686e2938"
@@ -58,8 +64,14 @@ var (
 	ProxyAdminAddr                    = common.HexToAddress(ProxyAdmin)
 	BaseFeeVaultAddr                  = common.HexToAddress(BaseFeeVault)
 	L1FeeVaultAddr                    = common.HexToAddress(L1FeeVault)
+	OperatorFeeVaultAddr              = common.HexToAddress(OperatorFeeVault)
 	SchemaRegistryAddr                = common.HexToAddress(SchemaRegistry)
 	EASAddr                           = common.HexToAddress(EAS)
+	CrossL2InboxAddr                  = common.HexToAddress(CrossL2Inbox)
+	L2toL2CrossDomainMessengerAddr    = common.HexToAddress(L2toL2CrossDomainMessenger)
+	SuperchainETHBridgeAddr           = common.HexToAddress(SuperchainETHBridge)
+	ETHLiquidityAddr                  = common.HexToAddress(ETHLiquidity)
+	SuperchainTokenBridgeAddr         = common.HexToAddress(SuperchainTokenBridge)
 	Create2DeployerAddr               = common.HexToAddress(Create2Deployer)
 	MultiCall3Addr                    = common.HexToAddress(MultiCall3)
 	Safe_v130Addr                     = common.HexToAddress(Safe_v130)
@@ -89,6 +101,11 @@ func init() {
 	Predeploys["L1BlockNumber"] = &Predeploy{Address: L1BlockNumberAddr}
 	Predeploys["GasPriceOracle"] = &Predeploy{Address: GasPriceOracleAddr}
 	Predeploys["L1Block"] = &Predeploy{Address: L1BlockAddr}
+	Predeploys["CrossL2Inbox"] = &Predeploy{Address: CrossL2InboxAddr}
+	Predeploys["L2toL2CrossDomainMessenger"] = &Predeploy{Address: L2toL2CrossDomainMessengerAddr}
+	Predeploys["SuperchainETHBridge"] = &Predeploy{Address: SuperchainETHBridgeAddr}
+	Predeploys["ETHLiquidity"] = &Predeploy{Address: ETHLiquidityAddr}
+	Predeploys["SuperchainTokenBridge"] = &Predeploy{Address: SuperchainTokenBridgeAddr}
 	Predeploys["GovernanceToken"] = &Predeploy{
 		Address:       GovernanceTokenAddr,
 		ProxyDisabled: true,
@@ -102,6 +119,7 @@ func init() {
 	Predeploys["ProxyAdmin"] = &Predeploy{Address: ProxyAdminAddr}
 	Predeploys["BaseFeeVault"] = &Predeploy{Address: BaseFeeVaultAddr}
 	Predeploys["L1FeeVault"] = &Predeploy{Address: L1FeeVaultAddr}
+	Predeploys["OperatorFeeVault"] = &Predeploy{Address: OperatorFeeVaultAddr}
 	Predeploys["SchemaRegistry"] = &Predeploy{Address: SchemaRegistryAddr}
 	Predeploys["EAS"] = &Predeploy{Address: EASAddr}
 	Predeploys["Create2Deployer"] = &Predeploy{
