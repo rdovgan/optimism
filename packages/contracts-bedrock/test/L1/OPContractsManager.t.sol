@@ -12,7 +12,7 @@ import { DelegateCaller } from "test/mocks/Callers.sol";
 import { DeployOPChainInput } from "scripts/deploy/DeployOPChain.s.sol";
 import { DeployUtils } from "scripts/libraries/DeployUtils.sol";
 import { Deploy } from "scripts/deploy/Deploy.s.sol";
-
+import { Config } from "scripts/libraries/Config.sol";
 // Libraries
 import { EIP1967Helper } from "test/mocks/EIP1967Helper.sol";
 import { Blueprint } from "src/libraries/Blueprint.sol";
@@ -25,7 +25,7 @@ import { IL1ERC721Bridge } from "interfaces/L1/IL1ERC721Bridge.sol";
 import { IL1StandardBridge } from "interfaces/L1/IL1StandardBridge.sol";
 import { IOptimismMintableERC20Factory } from "interfaces/universal/IOptimismMintableERC20Factory.sol";
 import { IL1CrossDomainMessenger } from "interfaces/L1/IL1CrossDomainMessenger.sol";
-import { IMIPS } from "interfaces/cannon/IMIPS.sol";
+import { IMIPS2 } from "interfaces/cannon/IMIPS2.sol";
 import { IOptimismPortal2 } from "interfaces/L1/IOptimismPortal2.sol";
 import { IProxy } from "interfaces/universal/IProxy.sol";
 import { IProxyAdmin } from "interfaces/universal/IProxyAdmin.sol";
@@ -253,7 +253,7 @@ contract OPContractsManager_Upgrade_Harness is CommonTest {
     address upgrader;
     IOPContractsManager.OpChainConfig[] opChainConfigs;
     Claim absolutePrestate;
-    string public opChain = vm.envOr("FORK_OP_CHAIN", string("op"));
+    string public opChain = Config.forkOpChain();
 
     function setUp() public virtual override {
         super.disableUpgradedFork();
@@ -942,7 +942,7 @@ contract OPContractsManager_TestInit is Test {
             }),
             mipsImpl: DeployUtils.create1({
                 _name: "MIPS64",
-                _args: DeployUtils.encodeConstructor(abi.encodeCall(IMIPS.__constructor__, (oracle)))
+                _args: DeployUtils.encodeConstructor(abi.encodeCall(IMIPS2.__constructor__, (oracle, 6)))
             })
         });
 
