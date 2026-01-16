@@ -2,10 +2,12 @@ package deploy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/build"
@@ -59,7 +61,7 @@ type dockerBuildJob struct {
 	done        chan struct{}
 }
 
-func (f *Templater) localDockerImageOption() tmpl.TemplateContextOptions {
+func (f *Templater) localDockerImageOption(_ context.Context) tmpl.TemplateContextOptions {
 	// Initialize the build jobs map if it's nil
 	if f.buildJobs == nil {
 		f.buildJobs = make(map[string]*dockerBuildJob)
@@ -99,7 +101,7 @@ func (f *Templater) localDockerImageOption() tmpl.TemplateContextOptions {
 	})
 }
 
-func (f *Templater) localContractArtifactsOption(buildWg *sync.WaitGroup) tmpl.TemplateContextOptions {
+func (f *Templater) localContractArtifactsOption(ctx context.Context, buildWg *sync.WaitGroup) tmpl.TemplateContextOptions {
 	contractBuilder := build.NewContractBuilder(
 		build.WithContractBaseDir(f.baseDir),
 		build.WithContractDryRun(f.dryRun),
@@ -115,7 +117,7 @@ func (f *Templater) localContractArtifactsOption(buildWg *sync.WaitGroup) tmpl.T
 			f.contracts.started = true
 			buildWg.Add(1)
 			go func() {
-				url, err := contractBuilder.Build("")
+				url, err := contractBuilder.Build(ctx, "")
 				f.contracts.url = url
 				f.contracts.err = err
 				buildWg.Done()
@@ -126,7 +128,7 @@ func (f *Templater) localContractArtifactsOption(buildWg *sync.WaitGroup) tmpl.T
 	})
 }
 
-func (f *Templater) localPrestateOption(buildWg *sync.WaitGroup) tmpl.TemplateContextOptions {
+func (f *Templater) localPrestateOption(ctx context.Context, buildWg *sync.WaitGroup) tmpl.TemplateContextOptions {
 	holder := &localPrestateHolder{
 		baseDir:  f.baseDir,
 		buildDir: f.buildDir,
@@ -143,7 +145,7 @@ func (f *Templater) localPrestateOption(buildWg *sync.WaitGroup) tmpl.TemplateCo
 			f.prestate.started = true
 			buildWg.Add(1)
 			go func() {
-				info, err := holder.GetPrestateInfo()
+				info, err := holder.GetPrestateInfo(ctx)
 				f.prestate.info = info
 				f.prestate.err = err
 				buildWg.Done()
@@ -154,7 +156,6 @@ func (f *Templater) localPrestateOption(buildWg *sync.WaitGroup) tmpl.TemplateCo
 			return &PrestateInfo{
 				URL: f.urlBuilder(prestatePath...),
 				Hashes: map[string]string{
-					"prestate":         "dry_run_placeholder",
 					"prestate_mt64":    "dry_run_placeholder",
 					"prestate_interop": "dry_run_placeholder",
 				},
@@ -164,18 +165,39 @@ func (f *Templater) localPrestateOption(buildWg *sync.WaitGroup) tmpl.TemplateCo
 	})
 }
 
-func (f *Templater) Render() (*bytes.Buffer, error) {
+func (f *Templater) Render(ctx context.Context) (*bytes.Buffer, error) {
 	// Initialize the build jobs map if it's nil
 	if f.buildJobs == nil {
 		f.buildJobs = make(map[string]*dockerBuildJob)
 	}
 
+	// Check if template file exists
+	if _, err := os.Stat(f.templateFile); os.IsNotExist(err) {
+		return nil, fmt.Errorf("template file does not exist: %s", f.templateFile)
+	}
+
+	// Check if the template file contains template syntax
+	content, err := os.ReadFile(f.templateFile)
+	if err != nil {
+		return nil, fmt.Errorf("error reading template file: %w", err)
+	}
+
+	if len(content) == 0 {
+		return nil, fmt.Errorf("template file is empty: %s", f.templateFile)
+	}
+
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "{{") && !strings.Contains(contentStr, "}}") {
+		// This is a plain YAML file, return it as-is
+		return bytes.NewBuffer(content), nil
+	}
+
 	buildWg := &sync.WaitGroup{}
 
 	opts := []tmpl.TemplateContextOptions{
-		f.localDockerImageOption(),
-		f.localContractArtifactsOption(buildWg),
-		f.localPrestateOption(buildWg),
+		f.localDockerImageOption(ctx),
+		f.localContractArtifactsOption(ctx, buildWg),
+		f.localPrestateOption(ctx, buildWg),
 		tmpl.WithBaseDir(f.baseDir),
 	}
 
@@ -232,7 +254,7 @@ func (f *Templater) Render() (*bytes.Buffer, error) {
 			go func(j *dockerBuildJob) {
 				defer buildWg.Done()
 				log.Printf("Starting build for %s (tag: %s)", j.projectName, j.imageTag)
-				j.result, j.err = dockerBuilder.Build(j.projectName, j.imageTag)
+				j.result, j.err = dockerBuilder.Build(ctx, j.projectName, j.imageTag)
 				close(j.done) // Mark this job as done
 			}(job)
 		}

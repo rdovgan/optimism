@@ -9,13 +9,15 @@ import { IGovernanceToken } from "interfaces/governance/IGovernanceToken.sol";
 import { IMintManager } from "interfaces/governance/IMintManager.sol";
 import { DeployUtils } from "scripts/libraries/DeployUtils.sol";
 
-contract MintManager_Initializer is CommonTest {
+/// @title MintManager_TestInit
+/// @notice Reusable test initialization for `MintManager` tests.
+abstract contract MintManager_TestInit is CommonTest {
     address constant owner = address(0x1234);
     address constant rando = address(0x5678);
     IGovernanceToken internal gov;
     IMintManager internal manager;
 
-    /// @dev Sets up the test suite.
+    /// @notice Sets up the test suite.
     function setUp() public virtual override {
         super.setUp();
 
@@ -40,26 +42,30 @@ contract MintManager_Initializer is CommonTest {
     }
 }
 
-contract MintManager_constructor_Test is MintManager_Initializer {
-    /// @dev Tests that the constructor properly configures the contract.
+/// @title MintManager_Constructor_Test
+/// @notice Tests the constructor of the `MintManager` contract.
+contract MintManager_Constructor_Test is MintManager_TestInit {
+    /// @notice Tests that the constructor properly configures the contract.
     function test_constructor_succeeds() external view {
         assertEq(manager.owner(), owner);
         assertEq(address(manager.governanceToken()), address(gov));
     }
 }
 
-contract MintManager_mint_Test is MintManager_Initializer {
-    /// @dev Tests that the mint function properly mints tokens when called by the owner.
-    function test_mint_fromOwner_succeeds() external {
-        // Mint once.
-        vm.prank(owner);
-        manager.mint(owner, 100);
+/// @title MintManager_Mint_Test
+/// @notice Tests the `mint` function of the `MintManager` contract.
+contract MintManager_Mint_Test is MintManager_TestInit {
+    /// @notice Tests that the first mint can be any amount since no cap applies.
+    function testFuzz_mint_firstMint_succeeds(uint256 _amount) external {
+        _amount = bound(_amount, 0, type(uint192).max);
 
-        // Token balance increases.
-        assertEq(gov.balanceOf(owner), 100);
+        vm.prank(owner);
+        manager.mint(owner, _amount);
+
+        assertEq(gov.balanceOf(owner), _amount);
     }
 
-    /// @dev Tests that the mint function reverts when called by a non-owner.
+    /// @notice Tests that the mint function reverts when called by a non-owner.
     function test_mint_fromNotOwner_reverts() external {
         // Mint from rando fails.
         vm.prank(rando);
@@ -67,27 +73,27 @@ contract MintManager_mint_Test is MintManager_Initializer {
         manager.mint(owner, 100);
     }
 
-    /// @dev Tests that the mint function properly mints tokens when called by the owner a second
-    ///      time after the mint period has elapsed.
-    function test_mint_afterPeriodElapsed_succeeds() external {
-        // Mint once.
+    /// @notice Tests that subsequent mints succeed when within cap after period elapsed.
+    function testFuzz_mint_afterPeriodElapsed_succeeds(uint256 _initialAmount, uint256 _secondAmount) external {
+        _initialAmount = bound(_initialAmount, 1, type(uint192).max);
+
         vm.prank(owner);
-        manager.mint(owner, 100);
+        manager.mint(owner, _initialAmount);
 
-        // Token balance increases.
-        assertEq(gov.balanceOf(owner), 100);
+        assertEq(gov.balanceOf(owner), _initialAmount);
 
-        // Mint again after period elapsed (2% max).
+        uint256 maxMint = (_initialAmount * manager.MINT_CAP()) / manager.DENOMINATOR();
+        _secondAmount = bound(_secondAmount, 0, maxMint);
+
         vm.warp(block.timestamp + manager.MINT_PERIOD() + 1);
         vm.prank(owner);
-        manager.mint(owner, 2);
+        manager.mint(owner, _secondAmount);
 
-        // Token balance increases.
-        assertEq(gov.balanceOf(owner), 102);
+        assertEq(gov.balanceOf(owner), _initialAmount + _secondAmount);
     }
 
-    /// @dev Tests that the mint function always reverts when called before the mint period has
-    ///      elapsed, even if the caller is the owner.
+    /// @notice Tests that the mint function always reverts when called before the mint period has
+    ///         elapsed, even if the caller is the owner.
     function test_mint_beforePeriodElapsed_reverts() external {
         // Mint once.
         vm.prank(owner);
@@ -105,7 +111,7 @@ contract MintManager_mint_Test is MintManager_Initializer {
         assertEq(gov.balanceOf(owner), 100);
     }
 
-    /// @dev Tests that the owner cannot mint more than the mint cap.
+    /// @notice Tests that the owner cannot mint more than the mint cap.
     function test_mint_moreThanCap_reverts() external {
         // Mint once.
         vm.prank(owner);
@@ -125,18 +131,20 @@ contract MintManager_mint_Test is MintManager_Initializer {
     }
 }
 
-contract MintManager_upgrade_Test is MintManager_Initializer {
-    /// @dev Tests that the owner can upgrade the mint manager.
-    function test_upgrade_fromOwner_succeeds() external {
-        // Upgrade to new manager.
-        vm.prank(owner);
-        manager.upgrade(rando);
+/// @title MintManager_Upgrade_Test
+/// @notice Tests the `upgrade` function of the `MintManager` contract.
+contract MintManager_Upgrade_Test is MintManager_TestInit {
+    /// @notice Tests that the owner can upgrade to any non-zero address.
+    function testFuzz_upgrade_fromOwner_succeeds(address _newManager) external {
+        vm.assume(_newManager != address(0));
 
-        // New manager is rando.
-        assertEq(gov.owner(), rando);
+        vm.prank(owner);
+        manager.upgrade(_newManager);
+
+        assertEq(gov.owner(), _newManager);
     }
 
-    /// @dev Tests that the upgrade function reverts when called by a non-owner.
+    /// @notice Tests that the upgrade function reverts when called by a non-owner.
     function test_upgrade_fromNotOwner_reverts() external {
         // Upgrade from rando fails.
         vm.prank(rando);
@@ -144,8 +152,8 @@ contract MintManager_upgrade_Test is MintManager_Initializer {
         manager.upgrade(rando);
     }
 
-    /// @dev Tests that the upgrade function reverts when attempting to update to the zero
-    ///      address, even if the caller is the owner.
+    /// @notice Tests that the upgrade function reverts when attempting to update to the zero
+    ///         address, even if the caller is the owner.
     function test_upgrade_toZeroAddress_reverts() external {
         // Upgrade to zero address fails.
         vm.prank(owner);

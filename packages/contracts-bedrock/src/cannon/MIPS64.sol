@@ -66,8 +66,8 @@ contract MIPS64 is ISemver {
     }
 
     /// @notice The semantic version of the MIPS64 contract.
-    /// @custom:semver 1.1.0
-    string public constant version = "1.1.0";
+    /// @custom:semver 1.10.0
+    string public constant version = "1.10.0";
 
     /// @notice The preimage oracle contract.
     IPreimageOracle internal immutable ORACLE;
@@ -92,8 +92,8 @@ contract MIPS64 is ISemver {
 
     /// @param _oracle The address of the preimage oracle contract.
     constructor(IPreimageOracle _oracle, uint256 _stateVersion) {
-        // Supports VersionMultiThreaded64_v3 (v6)
-        if (_stateVersion != 6) {
+        // Supports VersionMultiThreaded64_v5 (8)
+        if (_stateVersion != 8) {
             revert UnsupportedStateVersion();
         }
         ORACLE = _oracle;
@@ -502,22 +502,22 @@ contract MIPS64 is ISemver {
                     uint32 futexVal = getFutexValue(effFutexAddr);
                     uint32 targetVal = uint32(a2);
                     if (futexVal != targetVal) {
-                        v0 = sys.SYS_ERROR_SIGNAL;
-                        v1 = sys.EAGAIN;
+                        v0 = sys.EAGAIN;
+                        v1 = sys.SYS_ERROR_SIGNAL;
                     } else {
                         return syscallYield(state, thread);
                     }
                 } else if (a1 == sys.FUTEX_WAKE_PRIVATE) {
                     return syscallYield(state, thread);
                 } else {
-                    v0 = sys.SYS_ERROR_SIGNAL;
-                    v1 = sys.EINVAL;
+                    v0 = sys.EINVAL;
+                    v1 = sys.SYS_ERROR_SIGNAL;
                 }
             } else if (syscall_no == sys.SYS_SCHED_YIELD || syscall_no == sys.SYS_NANOSLEEP) {
                 return syscallYield(state, thread);
             } else if (syscall_no == sys.SYS_OPEN) {
-                v0 = sys.SYS_ERROR_SIGNAL;
-                v1 = sys.EBADF;
+                v0 = sys.EBADF;
+                v1 = sys.SYS_ERROR_SIGNAL;
             } else if (syscall_no == sys.SYS_CLOCKGETTIME) {
                 if (a0 == sys.CLOCK_GETTIME_REALTIME_FLAG || a0 == sys.CLOCK_GETTIME_MONOTONIC_FLAG) {
                     v0 = 0;
@@ -553,13 +553,17 @@ contract MIPS64 is ISemver {
                         MIPS64Memory.writeMem(effAddr + 8, MIPS64Memory.memoryProofOffset(MEM_PROOF_OFFSET, 2), nsecs);
                     handleMemoryUpdate(state, effAddr + 8);
                 } else {
-                    v0 = sys.SYS_ERROR_SIGNAL;
-                    v1 = sys.EINVAL;
+                    v0 = sys.EINVAL;
+                    v1 = sys.SYS_ERROR_SIGNAL;
                 }
             } else if (syscall_no == sys.SYS_GETPID) {
                 v0 = 0;
                 v1 = 0;
+            } else if (syscall_no == sys.SYS_GETRANDOM) {
+                (v0, v1, state.memRoot) = syscallGetRandom(state, a0, a1);
             } else if (syscall_no == sys.SYS_MUNMAP) {
+                // ignored
+            } else if (syscall_no == sys.SYS_MPROTECT) {
                 // ignored
             } else if (syscall_no == sys.SYS_GETAFFINITY) {
                 // ignored
@@ -597,8 +601,6 @@ contract MIPS64 is ISemver {
                 // ignored
             } else if (syscall_no == sys.SYS_EPOLLPWAIT) {
                 // ignored
-            } else if (syscall_no == sys.SYS_GETRANDOM) {
-                // ignored
             } else if (syscall_no == sys.SYS_UNAME) {
                 // ignored
             } else if (syscall_no == sys.SYS_GETUID) {
@@ -621,6 +623,16 @@ contract MIPS64 is ISemver {
                 // ignored
             } else if (syscall_no == sys.SYS_LSEEK) {
                 // ignored
+            } else if (syscall_no == sys.SYS_EVENTFD2) {
+                // a0 = initial value, a1 = flags
+                // Validate flags
+                if (a1 & sys.EFD_NONBLOCK == 0) {
+                    // The non-block flag was not set, but we only support non-block requests, so error
+                    v0 = sys.EINVAL;
+                    v1 = sys.SYS_ERROR_SIGNAL;
+                } else {
+                    v0 = sys.FD_EVENTFD;
+                }
             } else {
                 revert("MIPS64: unimplemented syscall");
             }
@@ -631,6 +643,55 @@ contract MIPS64 is ISemver {
 
             updateCurrentThreadRoot();
             out_ = outputState();
+        }
+    }
+
+    function syscallGetRandom(
+        State memory _state,
+        uint64 _a0,
+        uint64 _a1
+    )
+        internal
+        pure
+        returns (uint64 v0_, uint64 v1_, bytes32 memRoot_)
+    {
+        uint64 effAddr = _a0 & arch.ADDRESS_MASK;
+        uint256 memProofOffset = MIPS64Memory.memoryProofOffset(MEM_PROOF_OFFSET, 1);
+        uint64 memVal = MIPS64Memory.readMem(_state.memRoot, effAddr, memProofOffset);
+
+        // Generate some pseudorandom data
+        uint64 randomWord = splitmix64(_state.step);
+
+        // Calculate number of bytes to write
+        uint64 targetByteIndex = _a0 - effAddr;
+        uint64 maxBytes = arch.WORD_SIZE_BYTES - targetByteIndex;
+        uint64 byteCount = _a1;
+        if (maxBytes < byteCount) {
+            byteCount = maxBytes;
+        }
+
+        // Write random data into target memory location
+        uint64 randDataMask = uint64((1 << (byteCount * 8)) - 1);
+        // Shift left to align with index 0, then shift right to target correct index
+        randDataMask <<= (arch.WORD_SIZE_BYTES - byteCount) * 8;
+        randDataMask >>= targetByteIndex * 8;
+        uint64 newMemVal = (memVal & ~randDataMask) | (randomWord & randDataMask);
+
+        memRoot_ = MIPS64Memory.writeMem(effAddr, memProofOffset, newMemVal);
+        handleMemoryUpdate(_state, effAddr);
+
+        v0_ = byteCount;
+        v1_ = 0;
+    }
+
+    // splitmix64 generates a pseudorandom 64-bit value.
+    // See canonical implementation: https://prng.di.unimi.it/splitmix64.c
+    function splitmix64(uint64 _seed) internal pure returns (uint64) {
+        unchecked {
+            uint64 z = _seed + 0x9e3779b97f4a7c15;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+            return z ^ (z >> 31);
         }
     }
 

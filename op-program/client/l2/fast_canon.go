@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 
+	l2Types "github.com/ethereum-optimism/optimism/op-program/client/l2/types"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -33,6 +34,7 @@ type FastCanonicalBlockHeaderOracle struct {
 	ctx           *chainContext
 	db            ethdb.KeyValueStore
 	cache         *simplelru.LRU[uint64, *types.Header]
+	hinter        l2Types.OracleHinter
 }
 
 func NewFastCanonicalBlockHeaderOracle(
@@ -54,6 +56,7 @@ func NewFastCanonicalBlockHeaderOracle(
 		fallback:      fallback,
 		ctx:           ctx,
 		db:            db,
+		hinter:        stateOracle.Hinter(),
 		cache:         cache,
 	}
 }
@@ -88,8 +91,8 @@ func (o *FastCanonicalBlockHeaderOracle) GetHeaderByNumber(n uint64) *types.Head
 	for h.Number.Uint64() > n {
 		headNumber := h.Number.Uint64()
 		var currEarliestHistory uint64
-		if params.HistoryServeWindow-1 < headNumber {
-			currEarliestHistory = headNumber - (params.HistoryServeWindow - 1)
+		if params.HistoryServeWindow < headNumber {
+			currEarliestHistory = headNumber - params.HistoryServeWindow
 		}
 		if currEarliestHistory <= n {
 			block := o.getHistoricalBlockHash(h, n)
@@ -109,6 +112,9 @@ func (o *FastCanonicalBlockHeaderOracle) GetHeaderByNumber(n uint64) *types.Head
 }
 
 func (o *FastCanonicalBlockHeaderOracle) getHistoricalBlockHash(head *types.Header, n uint64) *types.Block {
+	if o.hinter != nil {
+		o.hinter.HintBlockHashLookup(n, head.Hash(), eth.ChainIDFromBig(o.config.ChainID))
+	}
 	statedb, err := state.New(head.Root, state.NewDatabase(triedb.NewDatabase(rawdb.NewDatabase(o.db), nil), nil))
 	if err != nil {
 		panic(fmt.Errorf("failed to get state at %v: %w", head.Hash(), err))
@@ -153,6 +159,8 @@ type chainContext struct {
 	config *params.ChainConfig
 }
 
+var _ core.ChainContext = (*chainContext)(nil)
+
 func (c *chainContext) Engine() consensus.Engine {
 	return c.engine
 }
@@ -164,4 +172,16 @@ func (c *chainContext) Config() *params.ChainConfig {
 func (c *chainContext) GetHeader(hash common.Hash, number uint64) *types.Header {
 	// The EVM should never call this method during eip-2935 historical block retrieval
 	panic("unexpected call to GetHeader")
+}
+
+func (c *chainContext) CurrentHeader() *types.Header {
+	panic("unimplemented")
+}
+
+func (c *chainContext) GetHeaderByHash(hash common.Hash) *types.Header {
+	panic("unimplemented")
+}
+
+func (c *chainContext) GetHeaderByNumber(number uint64) *types.Header {
+	panic("unimplemented")
 }

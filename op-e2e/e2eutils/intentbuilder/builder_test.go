@@ -10,10 +10,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/params/forks"
 
+	"github.com/ethereum-optimism/optimism/op-chain-ops/addresses"
+	opforks "github.com/ethereum-optimism/optimism/op-core/forks"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/artifacts"
+	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/standard"
 	"github.com/ethereum-optimism/optimism/op-deployer/pkg/deployer/state"
-	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
 
@@ -30,9 +33,11 @@ func TestBuilder(t *testing.T) {
 	superchainConfig.WithProxyAdminOwner(common.HexToAddress("0xaaaa"))
 	superchainConfig.WithGuardian(common.HexToAddress("0xbbbb"))
 	superchainConfig.WithProtocolVersionsOwner(common.HexToAddress("0xcccc"))
+	superchainConfig.WithChallenger(common.HexToAddress("0xdddd"))
 
 	// Configure L1
-	pragueOffset := uint64(100)
+	pragueOffset := uint64(0)
+	osakaOffset := uint64(1)
 	alice := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	aliceFunds := uint256.NewInt(10000)
 	l1Params := state.L1DevGenesisParams{
@@ -42,6 +47,7 @@ func TestBuilder(t *testing.T) {
 			ExcessBlobGas: 123,
 		},
 		PragueTimeOffset: &pragueOffset,
+		OsakaTimeOffset:  &osakaOffset,
 		Prefund: map[common.Address]*hexutil.U256{
 			alice: (*hexutil.U256)(aliceFunds),
 		},
@@ -51,7 +57,8 @@ func TestBuilder(t *testing.T) {
 	l1Config.WithTimestamp(l1Params.BlockParams.Timestamp)
 	l1Config.WithGasLimit(l1Params.BlockParams.GasLimit)
 	l1Config.WithExcessBlobGas(l1Params.BlockParams.ExcessBlobGas)
-	l1Config.WithPragueOffset(*l1Params.PragueTimeOffset)
+	l1Config.WithL1ForkAtGenesis(forks.Prague)
+	l1Config.WithL1ForkAtOffset(forks.Osaka, l1Params.OsakaTimeOffset)
 	l1Config.WithPrefundedAccount(alice, *aliceFunds)
 
 	// Configure L2
@@ -66,18 +73,24 @@ func TestBuilder(t *testing.T) {
 	require.Equal(t, eth.ChainIDFromUInt64(420), l2Config.ChainID())
 	l2Config.WithBlockTime(2)
 	l2Config.WithL1StartBlockHash(common.HexToHash("0x5678"))
+	l2Config.WithCustomGasToken("", "", nil, common.Address{})
 
 	// Test ContractsConfigurator methods
 	l2Config.WithL1ContractsLocator("http://l1.example.com")
 	l2Config.WithL2ContractsLocator("http://l2.example.com")
 
+	// Test RevenueShareConfigurator methods
+	l2Config.WithRevenueShare(true, common.HexToAddress("0x4444"))
+
 	// Test L2VaultsConfigurator methods
 	baseFeeRecipient := common.HexToAddress("0x1111")
 	sequencerFeeRecipient := common.HexToAddress("0x2222")
 	l1FeeRecipient := common.HexToAddress("0x3333")
+	operatorFeeRecipient := common.HexToAddress("0x4444")
 	l2Config.WithBaseFeeVaultRecipient(baseFeeRecipient)
 	l2Config.WithSequencerFeeVaultRecipient(sequencerFeeRecipient)
 	l2Config.WithL1FeeVaultRecipient(l1FeeRecipient)
+	l2Config.WithOperatorFeeVaultRecipient(operatorFeeRecipient)
 
 	// Test L2RolesConfigurator methods
 	l1ProxyAdminOwner := common.HexToAddress("0x4444")
@@ -101,11 +114,12 @@ func TestBuilder(t *testing.T) {
 	l2Config.WithEIP1559Elasticity(10)
 	l2Config.WithOperatorFeeScalar(100)
 	l2Config.WithOperatorFeeConstant(200)
+	l2Config.WithDAFootprintGasScalar(400)
 
 	// Test L2HardforkConfigurator methods
 	isthmusOffset := uint64(8000)
-	l2Config.WithForkAtGenesis(rollup.Holocene)
-	l2Config.WithForkAtOffset(rollup.Isthmus, &isthmusOffset)
+	l2Config.WithForkAtGenesis(opforks.Holocene)
+	l2Config.WithForkAtOffset(opforks.Isthmus, &isthmusOffset)
 
 	// Build the intent
 	intent, err := builder.Build()
@@ -118,10 +132,11 @@ func TestBuilder(t *testing.T) {
 		ConfigType:            state.IntentTypeCustom,
 		L1ChainID:             1,
 		SuperchainConfigProxy: &superchainConfigProxyAddr,
-		SuperchainRoles: &state.SuperchainRoles{
-			ProxyAdminOwner:       common.HexToAddress("0xaaaa"),
-			Guardian:              common.HexToAddress("0xbbbb"),
-			ProtocolVersionsOwner: common.HexToAddress("0xcccc"),
+		SuperchainRoles: &addresses.SuperchainRoles{
+			SuperchainProxyAdminOwner: common.HexToAddress("0xaaaa"),
+			SuperchainGuardian:        common.HexToAddress("0xbbbb"),
+			ProtocolVersionsOwner:     common.HexToAddress("0xcccc"),
+			Challenger:                common.HexToAddress("0xdddd"),
 		},
 		L1DevGenesisParams: &l1Params,
 		L1ContractsLocator: &artifacts.Locator{
@@ -142,6 +157,8 @@ func TestBuilder(t *testing.T) {
 				BaseFeeVaultRecipient:      baseFeeRecipient,
 				SequencerFeeVaultRecipient: sequencerFeeRecipient,
 				L1FeeVaultRecipient:        l1FeeRecipient,
+				OperatorFeeVaultRecipient:  operatorFeeRecipient,
+				DAFootprintGasScalar:       400,
 				Roles: state.ChainRoles{
 					L1ProxyAdminOwner: l1ProxyAdminOwner,
 					L2ProxyAdminOwner: l2ProxyAdminOwner,
@@ -154,24 +171,33 @@ func TestBuilder(t *testing.T) {
 				Eip1559DenominatorCanyon: 250,
 				Eip1559Denominator:       50,
 				Eip1559Elasticity:        10,
+				GasLimit:                 standard.GasLimit,
 				OperatorFeeScalar:        100,
 				OperatorFeeConstant:      200,
+				CustomGasToken: state.CustomGasToken{
+					Name:                     "",
+					Symbol:                   "",
+					InitialLiquidity:         nil,
+					LiquidityControllerOwner: common.Address{},
+				},
 				DeployOverrides: map[string]any{
 					"l2BlockTime":                 uint64(2),
-					"l2GenesisRegolithTimeOffset": 0,
-					"l2GenesisCanyonTimeOffset":   0,
-					"l2GenesisDeltaTimeOffset":    0,
-					"l2GenesisEcotoneTimeOffset":  0,
-					"l2GenesisFjordTimeOffset":    0,
-					"l2GenesisGraniteTimeOffset":  0,
-					"l2GenesisHoloceneTimeOffset": 0,
-					"l2GenesisIsthmusTimeOffset":  isthmusOffset,
+					"l2GenesisRegolithTimeOffset": hexutil.Uint64(0),
+					"l2GenesisCanyonTimeOffset":   hexutil.Uint64(0),
+					"l2GenesisDeltaTimeOffset":    hexutil.Uint64(0),
+					"l2GenesisEcotoneTimeOffset":  hexutil.Uint64(0),
+					"l2GenesisFjordTimeOffset":    hexutil.Uint64(0),
+					"l2GenesisGraniteTimeOffset":  hexutil.Uint64(0),
+					"l2GenesisHoloceneTimeOffset": hexutil.Uint64(0),
+					"l2GenesisIsthmusTimeOffset":  hexutil.Uint64(isthmusOffset),
 				},
 				L2DevGenesisParams: &state.L2DevGenesisParams{
 					Prefund: map[common.Address]*hexutil.U256{
 						bob: (*hexutil.U256)(bobFunds),
 					},
 				},
+				UseRevenueShare:    true,
+				ChainFeesRecipient: common.HexToAddress("0x4444"),
 			},
 		},
 	}

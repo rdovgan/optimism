@@ -4,16 +4,6 @@
       {
         "components": [
           {
-            "internalType": "GameType",
-            "name": "gameType",
-            "type": "uint32"
-          },
-          {
-            "internalType": "Claim",
-            "name": "absolutePrestate",
-            "type": "bytes32"
-          },
-          {
             "internalType": "uint256",
             "name": "maxGameDepth",
             "type": "uint256"
@@ -32,26 +22,6 @@
             "internalType": "Duration",
             "name": "maxClockDuration",
             "type": "uint64"
-          },
-          {
-            "internalType": "contract IBigStepper",
-            "name": "vm",
-            "type": "address"
-          },
-          {
-            "internalType": "contract IDelayedWETH",
-            "name": "weth",
-            "type": "address"
-          },
-          {
-            "internalType": "contract IAnchorStateRegistry",
-            "name": "anchorStateRegistry",
-            "type": "address"
-          },
-          {
-            "internalType": "uint256",
-            "name": "l2ChainId",
-            "type": "uint256"
           }
         ],
         "internalType": "struct SuperFaultDisputeGame.GameConstructorParams",
@@ -72,7 +42,7 @@
         "type": "bytes32"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -108,7 +78,7 @@
         "type": "address"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -362,7 +332,7 @@
         "type": "bytes"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -375,7 +345,7 @@
         "type": "uint32"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -690,6 +660,25 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "_chainId",
+        "type": "uint256"
+      }
+    ],
+    "name": "rootClaimByChainId",
+    "outputs": [
+      {
+        "internalType": "Claim",
+        "name": "outputRootClaim_",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "splitDepth",
     "outputs": [
@@ -834,7 +823,7 @@
         "type": "address"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -860,7 +849,7 @@
         "type": "address"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -926,6 +915,11 @@
   },
   {
     "inputs": [],
+    "name": "BadExtraData",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "BondTransferFailed",
     "type": "error"
   },
@@ -966,6 +960,21 @@
   },
   {
     "inputs": [],
+    "name": "Encoding_EmptySuperRoot",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "Encoding_InvalidSuperRootEncoding",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "Encoding_InvalidSuperRootVersion",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "GameDepthExceeded",
     "type": "error"
   },
@@ -982,6 +991,11 @@
   {
     "inputs": [],
     "name": "GameNotResolved",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "GamePaused",
     "type": "error"
   },
   {
@@ -1051,11 +1065,6 @@
   },
   {
     "inputs": [],
-    "name": "ReservedGameType",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "SuperFaultDisputeGameInvalidRootClaim",
     "type": "error"
   },
@@ -1068,6 +1077,11 @@
       }
     ],
     "name": "UnexpectedRootClaim",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "UnknownChainId",
     "type": "error"
   },
   {

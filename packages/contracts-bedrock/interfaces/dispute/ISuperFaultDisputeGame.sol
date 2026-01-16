@@ -5,7 +5,7 @@ import { IDisputeGame } from "interfaces/dispute/IDisputeGame.sol";
 import { IDelayedWETH } from "interfaces/dispute/IDelayedWETH.sol";
 import { IAnchorStateRegistry } from "interfaces/dispute/IAnchorStateRegistry.sol";
 import { IBigStepper } from "interfaces/dispute/IBigStepper.sol";
-import { GameType, Claim, Position, Clock, Hash, Duration, BondDistributionMode } from "src/dispute/lib/Types.sol";
+import { Claim, Position, Clock, Hash, Duration, BondDistributionMode } from "src/dispute/lib/Types.sol";
 
 interface ISuperFaultDisputeGame is IDisputeGame {
     struct ClaimData {
@@ -26,20 +26,15 @@ interface ISuperFaultDisputeGame is IDisputeGame {
     }
 
     struct GameConstructorParams {
-        GameType gameType;
-        Claim absolutePrestate;
         uint256 maxGameDepth;
         uint256 splitDepth;
         Duration clockExtension;
         Duration maxClockDuration;
-        IBigStepper vm;
-        IDelayedWETH weth;
-        IAnchorStateRegistry anchorStateRegistry;
-        uint256 l2ChainId;
     }
 
     error AlreadyInitialized();
     error AnchorRootNotFound();
+    error BadExtraData();
     error BondTransferFailed();
     error CannotDefendRootClaim();
     error ClaimAboveSplit();
@@ -68,8 +63,11 @@ interface ISuperFaultDisputeGame is IDisputeGame {
     error InvalidBondDistributionMode();
     error GameNotFinalized();
     error GameNotResolved();
-    error ReservedGameType();
-
+    error GamePaused();
+    error UnknownChainId();
+    error Encoding_EmptySuperRoot();
+    error Encoding_InvalidSuperRootVersion();
+    error Encoding_InvalidSuperRootEncoding();
     event Move(uint256 indexed parentIndex, Claim indexed claim, address indexed claimant);
     event GameClosed(BondDistributionMode bondDistributionMode);
 
@@ -107,6 +105,7 @@ interface ISuperFaultDisputeGame is IDisputeGame {
     function normalModeCredit(address) external view returns (uint256);
     function l2SequenceNumber() external pure returns (uint256 l2SequenceNumber_);
     function refundModeCredit(address) external view returns (uint256);
+    function rootClaimByChainId(uint256 _chainId) external pure returns (Claim outputRootClaim_);
     function resolutionCheckpoints(uint256)
         external
         view

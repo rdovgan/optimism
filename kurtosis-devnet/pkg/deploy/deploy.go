@@ -14,11 +14,15 @@ import (
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/api/engine"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/sources/spec"
 	autofixTypes "github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/types"
+	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/util"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type EngineManager interface {
 	EnsureRunning() error
 	GetEngineType() (string, error)
+	RestartEngine() error
 }
 
 type deployer interface {
@@ -43,6 +47,7 @@ type Deployer struct {
 	newEnclaveFS   func(ctx context.Context, enclave string, opts ...ktfs.EnclaveFSOption) (*ktfs.EnclaveFS, error)
 	enclaveManager *enclave.KurtosisEnclaveManager
 	autofixMode    autofixTypes.AutofixMode
+	tracer         trace.Tracer
 }
 
 func WithKurtosisDeployer(ktDeployer DeployerFunc) DeployerOption {
@@ -118,6 +123,7 @@ func NewDeployer(opts ...DeployerOption) (*Deployer, error) {
 			return kurtosis.NewKurtosisDeployer(opts...)
 		},
 		newEnclaveFS: ktfs.NewEnclaveFS,
+		tracer:       otel.Tracer("deployer"),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -160,6 +166,9 @@ func NewDeployer(opts ...DeployerOption) (*Deployer, error) {
 }
 
 func (d *Deployer) deployEnvironment(ctx context.Context, r io.Reader) (*kurtosis.KurtosisEnvironment, error) {
+	ctx, span := d.tracer.Start(ctx, "deploy environment")
+	defer span.End()
+
 	// Create a multi reader to output deployment input to stdout
 	buf := bytes.NewBuffer(nil)
 	tee := io.TeeReader(r, buf)
@@ -203,10 +212,22 @@ func (d *Deployer) deployEnvironment(ctx context.Context, r io.Reader) (*kurtosi
 		return nil, fmt.Errorf("error uploading devnet descriptor: %w", err)
 	}
 
+	// Only configure Traefik in non-dry-run mode when Docker is available
+	if !d.dryRun {
+		if err := util.SetReverseProxyConfig(ctx); err != nil {
+			return nil, fmt.Errorf("failed to set Traefik network configuration: %w", err)
+		}
+	}
+
+	fmt.Printf("Environment running successfully\n")
+
 	return info, nil
 }
 
-func (d *Deployer) renderTemplate(buildDir string, urlBuilder func(path ...string) string) (*bytes.Buffer, error) {
+func (d *Deployer) renderTemplate(ctx context.Context, buildDir string, urlBuilder func(path ...string) string) (*bytes.Buffer, error) {
+	ctx, span := d.tracer.Start(ctx, "render template")
+	defer span.End()
+
 	t := &Templater{
 		baseDir:        d.baseDir,
 		dryRun:         d.dryRun,
@@ -218,13 +239,21 @@ func (d *Deployer) renderTemplate(buildDir string, urlBuilder func(path ...strin
 		urlBuilder:     urlBuilder,
 	}
 
-	return t.Render()
+	return t.Render(ctx)
 }
 
 func (d *Deployer) Deploy(ctx context.Context, r io.Reader) (*kurtosis.KurtosisEnvironment, error) {
+	ctx, span := d.tracer.Start(ctx, "deploy devnet")
+	defer span.End()
 
 	// Clean up the enclave before deploying
 	if d.autofixMode == autofixTypes.AutofixModeNuke {
+		// Recreate the engine
+		log.Println("Restarting engine")
+		if err := d.engineManager.RestartEngine(); err != nil {
+			return nil, fmt.Errorf("error restarting engine: %w", err)
+		}
+		log.Println("Nuking enclave")
 		if d.enclaveManager != nil {
 			// Remove all the enclaves and destroy all the docker resources related to kurtosis
 			err := d.enclaveManager.Nuke(ctx)
@@ -233,6 +262,7 @@ func (d *Deployer) Deploy(ctx context.Context, r io.Reader) (*kurtosis.KurtosisE
 			}
 		}
 	} else if d.autofixMode == autofixTypes.AutofixModeNormal {
+		log.Println("Autofixing enclave")
 		if d.enclaveManager != nil {
 			if err := d.enclaveManager.Autofix(ctx, d.enclave); err != nil {
 				return nil, fmt.Errorf("error autofixing enclave: %w", err)
@@ -263,7 +293,7 @@ func (d *Deployer) Deploy(ctx context.Context, r io.Reader) (*kurtosis.KurtosisE
 
 	ch := srv.getState(ctx)
 
-	buf, err := d.renderTemplate(tmpDir, srv.URL)
+	buf, err := d.renderTemplate(ctx, tmpDir, srv.URL)
 	if err != nil {
 		return nil, fmt.Errorf("error rendering template: %w", err)
 	}

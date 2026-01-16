@@ -3,33 +3,23 @@ package tests
 import (
 	"io"
 
-	"github.com/ethereum-optimism/optimism/cannon/mipsevm/versions"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
+
+	mtutil "github.com/ethereum-optimism/optimism/cannon/mipsevm/multithreaded/testutil"
+	"github.com/ethereum-optimism/optimism/cannon/mipsevm/versions"
 
 	"github.com/ethereum-optimism/optimism/cannon/mipsevm"
 	"github.com/ethereum-optimism/optimism/cannon/mipsevm/arch"
 	"github.com/ethereum-optimism/optimism/cannon/mipsevm/multithreaded"
-	mttestutil "github.com/ethereum-optimism/optimism/cannon/mipsevm/multithreaded/testutil"
-	"github.com/ethereum-optimism/optimism/cannon/mipsevm/singlethreaded"
-	sttestutil "github.com/ethereum-optimism/optimism/cannon/mipsevm/singlethreaded/testutil"
 	"github.com/ethereum-optimism/optimism/cannon/mipsevm/testutil"
 )
 
-type VMFactory func(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, opts ...testutil.StateOption) mipsevm.FPVM
+type VMFactory func(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, opts ...mtutil.StateOption) mipsevm.FPVM
 
-func singleThreadedVmFactory(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, opts ...testutil.StateOption) mipsevm.FPVM {
-	state := singlethreaded.CreateEmptyState()
-	mutator := sttestutil.NewStateMutatorSingleThreaded(state)
-	for _, opt := range opts {
-		opt(mutator)
-	}
-	return singlethreaded.NewInstrumentedState(state, po, stdOut, stdErr, nil)
-}
-
-func multiThreadedVmFactory(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, features mipsevm.FeatureToggles, opts ...testutil.StateOption) mipsevm.FPVM {
+func multiThreadedVmFactory(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, features mipsevm.FeatureToggles, opts ...mtutil.StateOption) mipsevm.FPVM {
 	state := multithreaded.CreateEmptyState()
-	mutator := mttestutil.NewStateMutatorMultiThreaded(state)
+	mutator := mtutil.NewStateMutator(state)
 	for _, opt := range opts {
 		opt(mutator)
 	}
@@ -38,35 +28,14 @@ func multiThreadedVmFactory(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer,
 
 type ElfVMFactory func(t require.TestingT, elfFile string, po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger) mipsevm.FPVM
 
-func singleThreadElfVmFactory(t require.TestingT, elfFile string, po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger) mipsevm.FPVM {
-	state, meta := testutil.LoadELFProgram(t, elfFile, singlethreaded.CreateInitialState, true)
-	fpvm := singlethreaded.NewInstrumentedState(state, po, stdOut, stdErr, meta)
-	require.NoError(t, fpvm.InitDebug())
-	return fpvm
-}
-
 func multiThreadElfVmFactory(t require.TestingT, elfFile string, po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, features mipsevm.FeatureToggles) mipsevm.FPVM {
-	state, meta := testutil.LoadELFProgram(t, elfFile, multithreaded.CreateInitialState, false)
+	state, meta := testutil.LoadELFProgram(t, elfFile, multithreaded.CreateInitialState)
 	fpvm := multithreaded.NewInstrumentedState(state, po, stdOut, stdErr, log, meta, features)
 	require.NoError(t, fpvm.InitDebug())
 	return fpvm
 }
 
 type ProofGenerator func(t require.TestingT, state mipsevm.FPVMState, memoryProofAddresses ...arch.Word) []byte
-
-func singleThreadedProofGenerator(t require.TestingT, state mipsevm.FPVMState, memoryProofAddresses ...arch.Word) []byte {
-	var proofData []byte
-
-	insnProof := state.GetMemory().MerkleProof(state.GetPC())
-	proofData = append(proofData, insnProof[:]...)
-
-	for _, addr := range memoryProofAddresses {
-		memProof := state.GetMemory().MerkleProof(addr)
-		proofData = append(proofData, memProof[:]...)
-	}
-
-	return proofData
-}
 
 func multiThreadedProofGenerator(t require.TestingT, state mipsevm.FPVMState, memoryProofAddresses ...arch.Word) []byte {
 	mtState, ok := state.(*multithreaded.State)
@@ -94,27 +63,16 @@ type VersionedVMTestCase struct {
 	ElfVMFactory   ElfVMFactory
 	ProofGenerator ProofGenerator
 	Version        versions.StateVersion
+	GoTarget       testutil.GoTarget
 }
 
-func GetSingleThreadedTestCase(t require.TestingT) VersionedVMTestCase {
-	return VersionedVMTestCase{
-		Name:           "single-threaded",
-		Contracts:      testutil.TestContractsSetup(t, testutil.MipsSingleThreaded, 0),
-		StateHashFn:    singlethreaded.GetStateHashFn(),
-		VMFactory:      singleThreadedVmFactory,
-		ElfVMFactory:   singleThreadElfVmFactory,
-		ProofGenerator: singleThreadedProofGenerator,
-		Version:        versions.VersionSingleThreaded2,
-	}
-}
-
-func GetMultiThreadedTestCase(t require.TestingT, version versions.StateVersion) VersionedVMTestCase {
+func GetMultiThreadedTestCase(t require.TestingT, version versions.StateVersion, goTarget testutil.GoTarget) VersionedVMTestCase {
 	features := versions.FeaturesForVersion(version)
 	return VersionedVMTestCase{
 		Name:        version.String(),
 		Contracts:   testutil.TestContractsSetup(t, testutil.MipsMultithreaded, uint8(version)),
 		StateHashFn: multithreaded.GetStateHashFn(),
-		VMFactory: func(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, opts ...testutil.StateOption) mipsevm.FPVM {
+		VMFactory: func(po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger, opts ...mtutil.StateOption) mipsevm.FPVM {
 			return multiThreadedVmFactory(po, stdOut, stdErr, log, features, opts...)
 		},
 		ElfVMFactory: func(t require.TestingT, elfFile string, po mipsevm.PreimageOracle, stdOut, stdErr io.Writer, log log.Logger) mipsevm.FPVM {
@@ -122,26 +80,16 @@ func GetMultiThreadedTestCase(t require.TestingT, version versions.StateVersion)
 		},
 		ProofGenerator: multiThreadedProofGenerator,
 		Version:        version,
+		GoTarget:       goTarget,
 	}
-}
-
-func GetMultiThreadedTestCases(t require.TestingT) []VersionedVMTestCase {
-	var cases []VersionedVMTestCase
-	for _, version := range versions.StateVersionTypes {
-		if arch.IsMips32 && versions.IsSupportedMultiThreaded(version) {
-			cases = append(cases, GetMultiThreadedTestCase(t, version))
-		}
-		if !arch.IsMips32 && versions.IsSupportedMultiThreaded64(version) {
-			cases = append(cases, GetMultiThreadedTestCase(t, version))
-		}
-	}
-	return cases
 }
 
 func GetMipsVersionTestCases(t require.TestingT) []VersionedVMTestCase {
-	cases := GetMultiThreadedTestCases(t)
-	if arch.IsMips32 {
-		cases = append(cases, GetSingleThreadedTestCase(t))
+	var cases []VersionedVMTestCase
+	for _, version := range versions.StateVersionTypes {
+		if !arch.IsMips32 && versions.IsSupportedMultiThreaded64(version) {
+			cases = append(cases, GetMultiThreadedTestCase(t, version, testutil.Go1_25))
+		}
 	}
 	return cases
 }

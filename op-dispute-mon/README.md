@@ -24,6 +24,12 @@ shows the available config options and can be accessed by running `./bin/op-disp
 ./bin/op-dispute-mon \
   --network <Predefined-Network> \
   --l1-eth-rpc <L1-Ethereum-RPC-URL> \
-  --rollup-rpc <Optimism-Rollup-RPC-URL>
+  --rollup-rpc <Optimism-Rollup-RPC-URL>,<Secondary-RPC-URL>,<Tertiary-RPC-URL>
+
+# For networks using op-supernode:
+./bin/op-dispute-mon \
+  --network <Predefined-Network> \
+  --l1-eth-rpc <L1-Ethereum-RPC-URL> \
+  --supernode-rpc <SuperNode-RPC-URL>,<Secondary-RPC-URL>,<Tertiary-RPC-URL>
 
 ```

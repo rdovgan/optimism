@@ -9,13 +9,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	types2 "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 
-	"github.com/ethereum-optimism/optimism/op-node/rollup/event"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/event"
 	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/oppprof"
@@ -31,33 +30,50 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-func TestBackendLifetime(t *testing.T) {
+const testChainIDOffset = 900
+
+func fullConfigSet(t *testing.T, size int) depset.FullConfigSetMerged {
+	staticDepSet := make(map[eth.ChainID]*depset.StaticConfigDependency, size)
+	staticRollupCfgSet := make(map[eth.ChainID]*depset.StaticRollupConfig, size)
+	zero := uint64(0)
+	for i := 0; i < size; i++ {
+		chainID := eth.ChainIDFromUInt64(testChainIDOffset + uint64(i))
+		staticDepSet[chainID] = &depset.StaticConfigDependency{}
+		staticRollupCfgSet[chainID] = &depset.StaticRollupConfig{
+			InteropTime: &zero,
+			BlockTime:   2,
+		}
+	}
+	depSet, err := depset.NewStaticConfigDependencySet(staticDepSet)
+	require.NoError(t, err)
+	rollupCfgSet := depset.NewStaticRollupConfigSet(staticRollupCfgSet)
+	fullCfgSet, err := depset.NewFullConfigSetMerged(rollupCfgSet, depSet)
+	require.NoError(t, err)
+	return fullCfgSet
+}
+
+func TestBackendLifetime_InteropAtGenesis(t *testing.T) {
 	logger := testlog.Logger(t, log.LvlInfo)
 	m := metrics.NoopMetrics
 	dataDir := t.TempDir()
-	chainA := eth.ChainIDFromUInt64(900)
-	chainB := eth.ChainIDFromUInt64(901)
-	depSet, err := depset.NewStaticConfigDependencySet(
-		map[eth.ChainID]*depset.StaticConfigDependency{
-			chainA: {
-				ChainIndex:     900,
-				ActivationTime: 42,
-				HistoryMinTime: 100,
-			},
-			chainB: {
-				ChainIndex:     901,
-				ActivationTime: 30,
-				HistoryMinTime: 20,
-			},
-		})
-	require.NoError(t, err)
+	chainA := eth.ChainIDFromUInt64(testChainIDOffset)
+	fullCfgSet := fullConfigSet(t, 2)
+	rollupCfgSet := fullCfgSet.RollupConfigSet.(depset.StaticRollupConfigSet)
+
+	anchor := eth.BlockRef{
+		Hash:       common.Hash{0xff},
+		Number:     0,
+		ParentHash: common.Hash{}, // genesis has no parent hash
+		Time:       10000,
+	}
+
+	rollupCfgSet[chainA].Genesis = depset.Genesis{
+		L2: types.BlockSealFromRef(anchor),
+	}
+
 	cfg := &config.Config{
 		Version:               "test",
-		LogConfig:             oplog.CLIConfig{},
-		MetricsConfig:         opmetrics.CLIConfig{},
-		PprofConfig:           oppprof.CLIConfig{},
-		RPC:                   oprpc.CLIConfig{},
-		DependencySetSource:   depSet,
+		FullConfigSetSource:   fullCfgSet,
 		SynchronousProcessors: true,
 		MockRun:               false,
 		SyncSources:           &syncnode.CLISyncNodes{},
@@ -72,19 +88,13 @@ func TestBackendLifetime(t *testing.T) {
 	l1Src := &testutils.MockL1Source{}
 	src := &MockProcessorSource{}
 
-	anchorBlock := eth.BlockRef{
+	blockX := eth.L2BlockRef{
 		Hash:       common.Hash{0xaa},
-		Number:     0,
-		ParentHash: common.Hash{}, // genesis has no parent hash
-		Time:       10000,
+		Number:     anchor.Number + 1,
+		ParentHash: anchor.Hash,
+		Time:       anchor.Time + 2,
 	}
-	blockX := eth.BlockRef{
-		Hash:       common.Hash{0xaa},
-		Number:     1,
-		ParentHash: anchorBlock.Hash,
-		Time:       10000,
-	}
-	blockY := eth.BlockRef{
+	blockY := eth.L2BlockRef{
 		Hash:       common.Hash{0xbb},
 		Number:     blockX.Number + 1,
 		ParentHash: blockX.Hash,
@@ -108,61 +118,207 @@ func TestBackendLifetime(t *testing.T) {
 	_, err = b.LocalUnsafe(context.Background(), chainA)
 	require.ErrorIs(t, err, types.ErrFuture, "no data yet, need local-unsafe")
 
-	src.ExpectBlockRefByNumber(0, anchorBlock, nil)
-	src.ExpectFetchReceipts(blockX.Hash, nil, nil)
+	require.NoError(t, ex.Drain())
+	// The database is initialized from the genesis interop block at startup.
+	xunsafe, err := b.CrossUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, anchor.ID(), xunsafe)
+	xsafe, err := b.CrossSafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, anchor.ID(), xsafe.Derived)
 
-	src.ExpectBlockRefByNumber(1, blockX, nil)
-	src.ExpectFetchReceipts(blockX.Hash, nil, nil)
+	// Receive unsafe block Y from node
 
-	src.ExpectBlockRefByNumber(2, blockY, nil)
+	src.ExpectL2BlockRefByNumber(1, blockX, nil)
+	src.ExpectFetchReceipts(blockX.Hash, nil, nil)
+	src.ExpectL2BlockRefByNumber(2, blockY, nil)
 	src.ExpectFetchReceipts(blockY.Hash, nil, nil)
-
-	src.ExpectBlockRefByNumber(3, eth.L1BlockRef{}, ethereum.NotFound)
-
-	// The first time a Local Unsafe is received, the database is not initialized,
-	// so the call to b.CrossUnsafe will fail.
-	b.emitter.Emit(superevents.LocalUnsafeReceivedEvent{
+	b.emitter.Emit(context.Background(), superevents.LocalUnsafeReceivedEvent{
 		ChainID:        chainA,
-		NewLocalUnsafe: blockY,
+		NewLocalUnsafe: blockY.BlockRef(),
 	})
 	require.NoError(t, ex.Drain())
-	_, err = b.CrossUnsafe(context.Background(), chainA)
-	require.ErrorIs(t, err, types.ErrFuture)
+	src.AssertExpectations(t)
+	xunsafe, err = b.CrossUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockY.ID(), xunsafe)
+	// cross-safe still at anchor
+	xsafe, err = b.CrossSafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, anchor.ID(), xsafe.Derived)
 
-	// After the anchor event, the database is initialized, and the call to update
-	// from the LocalUnsafe event will succeed.
-	src.ExpectBlockRefByNumber(1, blockX, nil)
-	src.ExpectFetchReceipts(blockX.Hash, nil, nil)
-	src.ExpectBlockRefByNumber(2, blockY, nil)
-	src.ExpectFetchReceipts(blockY.Hash, nil, nil)
-	b.emitter.Emit(superevents.AnchorEvent{
-		ChainID: chainA,
-		Anchor: types.DerivedBlockRefPair{
-			Derived: anchorBlock,
-			Source:  eth.L1BlockRef{},
-		}})
-	require.NoError(t, ex.Drain())
-	b.emitter.Emit(superevents.LocalUnsafeReceivedEvent{
-		ChainID:        chainA,
-		NewLocalUnsafe: blockY,
-	})
-	// Make the processing happen, so we can rely on the new chain information,
-	// and not run into errors for future data that isn't mocked at this time.
-	require.NoError(t, ex.Drain())
-	v, err := b.CrossUnsafe(context.Background(), chainA)
-	require.NoError(t, err, "have a functioning cross unsafe value now post anchor")
-	require.Equal(t, blockY.ID(), v)
-
-	err = b.chainDBs.UpdateCrossUnsafe(chainA, types.BlockSeal{
-		Hash:      blockX.Hash,
-		Number:    blockX.Number,
-		Timestamp: blockX.Time,
-	})
+	// Revert cross-unafe back to block X
+	err = b.chainDBs.UpdateCrossUnsafe(chainA, types.BlockSealFromRef(blockX.BlockRef()))
 	require.NoError(t, err)
 
-	v, err = b.CrossUnsafe(context.Background(), chainA)
-	require.NoError(t, err, "have a functioning cross unsafe value now")
-	require.Equal(t, blockX.ID(), v)
+	xunsafe, err = b.CrossUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockX.ID(), xunsafe)
+
+	// Receive derived block X from node
+
+	b.emitter.Emit(context.Background(), superevents.LocalDerivedEvent{
+		ChainID: chainA,
+		Derived: types.DerivedBlockRefPair{
+			Derived: blockX.BlockRef(),
+		},
+	})
+	require.NoError(t, ex.Drain())
+	src.AssertExpectations(t)
+	// cross-unsafe still at block X
+	xunsafe, err = b.CrossUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockY.ID(), xunsafe)
+	// cross-safe now at block X
+	xsafe, err = b.CrossSafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockX.ID(), xsafe.Derived)
+
+	err = b.Stop(context.Background())
+	require.NoError(t, err)
+	t.Log("stopped!")
+}
+
+func TestBackendLifetime_InteropPostGenesis(t *testing.T) {
+	logger := testlog.Logger(t, log.LvlInfo)
+	m := metrics.NoopMetrics
+	dataDir := t.TempDir()
+	chainA := eth.ChainIDFromUInt64(testChainIDOffset)
+	fullCfgSet := fullConfigSet(t, 2)
+	rollupCfgSet := fullCfgSet.RollupConfigSet.(depset.StaticRollupConfigSet)
+
+	block0 := eth.BlockRef{
+		Hash:       common.Hash{0xff},
+		Number:     0,
+		ParentHash: common.Hash{}, // genesis has no parent hash
+		Time:       10000,
+	}
+	blockX := eth.BlockRef{
+		Hash:       common.Hash{0xaa},
+		Number:     block0.Number + 1,
+		ParentHash: block0.Hash,
+		Time:       block0.Time + 2,
+	}
+
+	rollupCfgSet[chainA].InteropTime = &blockX.Time
+	rollupCfgSet[chainA].Genesis = depset.Genesis{
+		L2: types.BlockSealFromRef(block0),
+	}
+
+	cfg := &config.Config{
+		Version:               "test",
+		FullConfigSetSource:   fullCfgSet,
+		SynchronousProcessors: true,
+		MockRun:               false,
+		SyncSources:           &syncnode.CLISyncNodes{},
+		Datadir:               dataDir,
+	}
+
+	ex := event.NewGlobalSynchronous(context.Background())
+	b, err := NewSupervisorBackend(context.Background(), logger, m, cfg, ex)
+	require.NoError(t, err)
+	t.Log("initialized!")
+
+	l1Src := &testutils.MockL1Source{}
+	src := &MockProcessorSource{}
+
+	blockY := eth.L2BlockRef{
+		Hash:       common.Hash{0xbb},
+		Number:     blockX.Number + 1,
+		ParentHash: blockX.Hash,
+		Time:       blockX.Time + 2,
+	}
+
+	b.AttachL1Source(l1Src)
+	require.NoError(t, b.AttachProcessorSource(chainA, src))
+
+	require.FileExists(t, filepath.Join(cfg.Datadir, "900", "log.db"), "must have logs DB 900")
+	require.FileExists(t, filepath.Join(cfg.Datadir, "901", "log.db"), "must have logs DB 901")
+	require.FileExists(t, filepath.Join(cfg.Datadir, "900", "local_safe.db"), "must have local safe DB 900")
+	require.FileExists(t, filepath.Join(cfg.Datadir, "901", "local_safe.db"), "must have local safe DB 901")
+	require.FileExists(t, filepath.Join(cfg.Datadir, "900", "cross_safe.db"), "must have cross safe DB 900")
+	require.FileExists(t, filepath.Join(cfg.Datadir, "901", "cross_safe.db"), "must have cross safe DB 901")
+
+	err = b.Start(context.Background())
+	require.NoError(t, err)
+	t.Log("started!")
+
+	_, err = b.LocalUnsafe(context.Background(), chainA)
+	require.ErrorIs(t, err, types.ErrFuture, "no data yet, need local-unsafe")
+
+	require.NoError(t, ex.Drain())
+	// The database is not initialized from non-Interop genesis
+	xunsafe, err := b.CrossUnsafe(context.Background(), chainA)
+	require.ErrorIs(t, err, types.ErrFuture, "got xunsafe %v", xunsafe)
+	xsafe, err := b.CrossSafe(context.Background(), chainA)
+	require.ErrorIs(t, err, types.ErrFuture, "got xsafe %v", xsafe)
+
+	// Receive unsafe block X, interop activation block, from node
+
+	// src.ExpectL2BlockRefByNumber(1, blockX, nil)
+	// src.ExpectFetchReceipts(blockX.Hash, nil, nil)
+	b.emitter.Emit(context.Background(), superevents.LocalUnsafeReceivedEvent{
+		ChainID:        chainA,
+		NewLocalUnsafe: blockX,
+	})
+	require.NoError(t, ex.Drain())
+	src.AssertExpectations(t)
+	unsafe, err := b.LocalUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockX.ID(), unsafe)
+	xunsafe, err = b.CrossUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockX.ID(), xunsafe)
+	// cross-safe still undefined
+	_, err = b.CrossSafe(context.Background(), chainA)
+	require.ErrorIs(t, err, types.ErrFuture, err)
+
+	// Receive unsafe block Y from node
+
+	src.ExpectL2BlockRefByNumber(blockY.Number, blockY, nil)
+	src.ExpectFetchReceipts(blockY.Hash, nil, nil)
+	b.emitter.Emit(context.Background(), superevents.LocalUnsafeReceivedEvent{
+		ChainID:        chainA,
+		NewLocalUnsafe: blockY.BlockRef(),
+	})
+	require.NoError(t, ex.Drain())
+	src.AssertExpectations(t)
+	xunsafe, err = b.CrossUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockY.ID(), xunsafe)
+
+	// Receive derived block X from node
+
+	b.emitter.Emit(context.Background(), superevents.LocalDerivedEvent{
+		ChainID: chainA,
+		Derived: types.DerivedBlockRefPair{
+			Derived: blockX,
+		},
+	})
+	require.NoError(t, ex.Drain())
+	src.AssertExpectations(t)
+	// cross-unsafe still at block Y
+	xunsafe, err = b.CrossUnsafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockY.ID(), xunsafe)
+	// cross-safe now at block X
+	xsafe, err = b.CrossSafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockX.ID(), xsafe.Derived)
+
+	// Receive derived block Y from node
+
+	b.emitter.Emit(context.Background(), superevents.LocalDerivedEvent{
+		ChainID: chainA,
+		Derived: types.DerivedBlockRefPair{
+			Derived: blockY.BlockRef(),
+		},
+	})
+	require.NoError(t, ex.Drain())
+	// cross-safe now at block Y
+	xsafe, err = b.CrossSafe(context.Background(), chainA)
+	require.NoError(t, err)
+	require.Equal(t, blockY.ID(), xsafe.Derived)
 
 	err = b.Stop(context.Background())
 	require.NoError(t, err)
@@ -173,30 +329,25 @@ func TestBackendCallsMetrics(t *testing.T) {
 	logger := testlog.Logger(t, log.LvlInfo)
 	mockMetrics := &MockMetrics{}
 	dataDir := t.TempDir()
-	chainA := eth.ChainIDFromUInt64(900)
+	chainA := eth.ChainIDFromUInt64(testChainIDOffset)
 
 	// Set up mock metrics
 	mockMetrics.Mock.On("RecordDBEntryCount", chainA, mock.AnythingOfType("string"), mock.AnythingOfType("int64")).Return()
-	mockMetrics.Mock.On("RecordCrossUnsafeRef", chainA, mock.MatchedBy(func(_ eth.BlockRef) bool { return true })).Return()
-	mockMetrics.Mock.On("RecordCrossSafeRef", chainA, mock.MatchedBy(func(_ eth.BlockRef) bool { return true })).Return()
+	mockMetrics.Mock.On("RecordCrossUnsafe", chainA, mock.MatchedBy(func(_ types.BlockSeal) bool { return true })).Return()
+	mockMetrics.Mock.On("RecordCrossSafe", chainA, mock.MatchedBy(func(_ types.BlockSeal) bool { return true })).Return()
+	mockMetrics.Mock.On("RecordLocalSafe", chainA, mock.MatchedBy(func(_ types.BlockSeal) bool { return true })).Return()
+	mockMetrics.Mock.On("RecordLocalUnsafe", chainA, mock.MatchedBy(func(_ types.BlockSeal) bool { return true })).Return()
 
-	depSet, err := depset.NewStaticConfigDependencySet(
-		map[eth.ChainID]*depset.StaticConfigDependency{
-			chainA: {
-				ChainIndex:     900,
-				ActivationTime: 42,
-				HistoryMinTime: 100,
-			},
-		})
-	require.NoError(t, err)
-
+	fullCfgSet := fullConfigSet(t, 1)
 	cfg := &config.Config{
-		Version:               "test",
-		LogConfig:             oplog.CLIConfig{},
-		MetricsConfig:         opmetrics.CLIConfig{},
-		PprofConfig:           oppprof.CLIConfig{},
-		RPC:                   oprpc.CLIConfig{},
-		DependencySetSource:   depSet,
+		Version:       "test",
+		LogConfig:     oplog.CLIConfig{},
+		MetricsConfig: opmetrics.CLIConfig{},
+		PprofConfig:   oppprof.CLIConfig{},
+		RPC: oprpc.CLIConfig{
+			ListenAddr: "127.0.0.1",
+		},
+		FullConfigSetSource:   fullCfgSet,
 		SynchronousProcessors: true,
 		MockRun:               false,
 		SyncSources:           &syncnode.CLISyncNodes{},
@@ -223,25 +374,32 @@ func TestBackendCallsMetrics(t *testing.T) {
 		ParentHash: common.Hash{0xbb},
 		Time:       10000,
 	}
-
-	b.chainDBs.ForceInitialized(chainA) // force init for test
-	// Assert that metrics are called on safety level updates
-	err = b.chainDBs.UpdateCrossUnsafe(chainA, types.BlockSeal{
-		Hash:      block.Hash,
-		Number:    block.Number,
-		Timestamp: block.Time,
+	safe := types.DerivedBlockRefPair{
+		Source:  block, // dummy value
+		Derived: block,
+	}
+	// update local unsafe/safe, cross unsafe/safe
+	b.chainDBs.OnEvent(context.Background(), superevents.SafeActivationBlockEvent{
+		Safe:    safe,
+		ChainID: chainA,
 	})
-	require.NoError(t, err)
-	mockMetrics.Mock.AssertCalled(t, "RecordCrossUnsafeRef", chainA, mock.MatchedBy(func(ref eth.BlockRef) bool {
-		return ref.Hash == block.Hash && ref.Number == block.Number && ref.Time == block.Time
+	// Assert that metrics are called on safety level updates
+	mockMetrics.Mock.AssertCalled(t, "RecordLocalUnsafe", chainA, mock.MatchedBy(func(ref types.BlockSeal) bool {
+		return ref.Hash == block.Hash && ref.Number == block.Number && ref.Timestamp == block.Time
 	}))
-
-	err = b.chainDBs.UpdateCrossSafe(chainA, block, block)
-	require.NoError(t, err)
+	mockMetrics.Mock.AssertCalled(t, "RecordLocalSafe", chainA, mock.MatchedBy(func(ref types.BlockSeal) bool {
+		return ref.Hash == block.Hash && ref.Number == block.Number && ref.Timestamp == block.Time
+	}))
+	mockMetrics.Mock.AssertCalled(t, "RecordCrossUnsafe", chainA, mock.MatchedBy(func(ref types.BlockSeal) bool {
+		return ref.Hash == block.Hash && ref.Number == block.Number && ref.Timestamp == block.Time
+	}))
+	mockMetrics.Mock.AssertCalled(t, "RecordCrossSafe", chainA, mock.MatchedBy(func(ref types.BlockSeal) bool {
+		return ref.Hash == block.Hash && ref.Number == block.Number && ref.Timestamp == block.Time
+	}))
 	mockMetrics.Mock.AssertCalled(t, "RecordDBEntryCount", chainA, "cross_derived", int64(1))
-	mockMetrics.Mock.AssertCalled(t, "RecordCrossSafeRef", chainA, mock.MatchedBy(func(ref eth.BlockRef) bool {
-		return ref.Hash == block.Hash && ref.Number == block.Number && ref.Time == block.Time
-	}))
+	mockMetrics.Mock.AssertCalled(t, "RecordDBEntryCount", chainA, "local_derived", int64(1))
+	// db entry: searchCheckpoint, canonicalHash
+	mockMetrics.Mock.AssertCalled(t, "RecordDBEntryCount", chainA, "log", int64(2))
 
 	// Stop the backend
 	err = b.Stop(context.Background())
@@ -264,12 +422,20 @@ func (m *MockMetrics) CacheGet(chainID eth.ChainID, label string, hit bool) {
 	m.Mock.Called(chainID, label, hit)
 }
 
-func (m *MockMetrics) RecordCrossUnsafeRef(chainID eth.ChainID, ref eth.BlockRef) {
-	m.Mock.Called(chainID, ref)
+func (m *MockMetrics) RecordCrossUnsafe(chainID eth.ChainID, seal types.BlockSeal) {
+	m.Mock.Called(chainID, seal)
 }
 
-func (m *MockMetrics) RecordCrossSafeRef(chainID eth.ChainID, ref eth.BlockRef) {
-	m.Mock.Called(chainID, ref)
+func (m *MockMetrics) RecordCrossSafe(chainID eth.ChainID, seal types.BlockSeal) {
+	m.Mock.Called(chainID, seal)
+}
+
+func (m *MockMetrics) RecordLocalSafe(chainID eth.ChainID, seal types.BlockSeal) {
+	m.Mock.Called(chainID, seal)
+}
+
+func (m *MockMetrics) RecordLocalUnsafe(chainID eth.ChainID, seal types.BlockSeal) {
+	m.Mock.Called(chainID, seal)
 }
 
 func (m *MockMetrics) RecordDBEntryCount(chainID eth.ChainID, kind string, count int64) {
@@ -299,13 +465,13 @@ func (m *MockProcessorSource) ExpectFetchReceipts(hash common.Hash, receipts typ
 	m.Mock.On("FetchReceipts", hash).Once().Return(receipts, err)
 }
 
-func (m *MockProcessorSource) BlockRefByNumber(ctx context.Context, num uint64) (eth.BlockRef, error) {
+func (m *MockProcessorSource) L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error) {
 	out := m.Mock.Called(num)
-	return out.Get(0).(eth.BlockRef), out.Error(1)
+	return out.Get(0).(eth.L2BlockRef), out.Error(1)
 }
 
-func (m *MockProcessorSource) ExpectBlockRefByNumber(num uint64, ref eth.BlockRef, err error) {
-	m.Mock.On("BlockRefByNumber", num).Return(ref, err)
+func (m *MockProcessorSource) ExpectL2BlockRefByNumber(num uint64, ref eth.L2BlockRef, err error) {
+	m.Mock.On("L2BlockRefByNumber", num).Return(ref, err)
 }
 
 // fakeSyncSource implements syncnode.SyncSource for testing asyncVerifyAccessWithRPC.
@@ -323,7 +489,7 @@ func (f *fakeSyncSource) ChainID(_ context.Context) (eth.ChainID, error) {
 	return f.chainID, nil
 }
 
-func (f *fakeSyncSource) BlockRefByNumber(_ context.Context, _ uint64) (eth.BlockRef, error) {
+func (f *fakeSyncSource) L2BlockRefByNumber(_ context.Context, _ uint64) (eth.L2BlockRef, error) {
 	panic("should not be called")
 }
 
@@ -359,11 +525,8 @@ func (f *fakeSyncSource) String() string {
 func TestAsyncVerifyAccessWithRPC(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelInfo)
 	// Setup a single-chain dependency set
-	chainID := eth.ChainIDFromUInt64(1)
-	depSet, err := depset.NewStaticConfigDependencySet(map[eth.ChainID]*depset.StaticConfigDependency{
-		chainID: {ChainIndex: 1, ActivationTime: 0, HistoryMinTime: 0},
-	})
-	require.NoError(t, err)
+	chainID := eth.ChainIDFromUInt64(testChainIDOffset)
+	fullCfgSet := fullConfigSet(t, 1)
 
 	// Create and set up mock metrics
 	mockMetrics := &MockMetrics{}
@@ -374,12 +537,14 @@ func TestAsyncVerifyAccessWithRPC(t *testing.T) {
 
 	// Initialize backend with mock metrics
 	cfg := &config.Config{
-		Version:               "test",
-		LogConfig:             oplog.CLIConfig{},
-		MetricsConfig:         opmetrics.CLIConfig{},
-		PprofConfig:           oppprof.CLIConfig{},
-		RPC:                   oprpc.CLIConfig{},
-		DependencySetSource:   depSet,
+		Version:       "test",
+		LogConfig:     oplog.CLIConfig{},
+		MetricsConfig: opmetrics.CLIConfig{},
+		PprofConfig:   oppprof.CLIConfig{},
+		RPC: oprpc.CLIConfig{
+			ListenAddr: "127.0.0.1",
+		},
+		FullConfigSetSource:   fullCfgSet,
 		SynchronousProcessors: true,
 		MockRun:               false,
 		SyncSources:           &syncnode.CLISyncNodes{},
@@ -439,4 +604,156 @@ func TestAsyncVerifyAccessWithRPC(t *testing.T) {
 	runScenario("OtherErr_mismatch", sealA, types.ErrFuture, idB)
 	// No error + match         => 0 failures
 	runScenario("NoErr_match", sealA, nil, idA)
+}
+
+func TestFailsafeEnabled(t *testing.T) {
+	logger := testlog.Logger(t, log.LvlInfo)
+	m := metrics.NoopMetrics
+	dataDir := t.TempDir()
+	fullCfgSet := fullConfigSet(t, 1)
+
+	cfg := &config.Config{
+		Version:               "test",
+		FullConfigSetSource:   fullCfgSet,
+		SynchronousProcessors: true,
+		MockRun:               false,
+		SyncSources:           &syncnode.CLISyncNodes{},
+		Datadir:               dataDir,
+	}
+
+	ex := event.NewGlobalSynchronous(context.Background())
+	b, err := NewSupervisorBackend(context.Background(), logger, m, cfg, ex)
+	require.NoError(t, err)
+
+	// Test initial state - failsafe should be disabled by default
+	enabled, err := b.GetFailsafeEnabled(context.Background())
+	require.NoError(t, err)
+	require.False(t, enabled, "failsafe should be disabled by default")
+
+	// Test that CheckAccessList works normally in initial state
+	err = b.CheckAccessList(context.Background(), []common.Hash{}, types.LocalUnsafe, types.ExecutingDescriptor{})
+	require.NoError(t, err, "CheckAccessList should work normally when failsafe is disabled")
+
+	// Test setting failsafe to true
+	err = b.SetFailsafeEnabled(context.Background(), true)
+	require.NoError(t, err)
+	enabled, err = b.GetFailsafeEnabled(context.Background())
+	require.NoError(t, err)
+	require.True(t, enabled, "failsafe should be enabled after setting to true")
+
+	// Test that CheckAccessList returns ErrFailsafeEnabled when failsafe is enabled
+	err = b.CheckAccessList(context.Background(), []common.Hash{}, types.LocalUnsafe, types.ExecutingDescriptor{})
+	require.ErrorIs(t, err, types.ErrFailsafeEnabled, "CheckAccessList should return ErrFailsafeEnabled when failsafe is enabled")
+
+	// Test setting failsafe to false
+	err = b.SetFailsafeEnabled(context.Background(), false)
+	require.NoError(t, err)
+	enabled, err = b.GetFailsafeEnabled(context.Background())
+	require.NoError(t, err)
+	require.False(t, enabled, "failsafe should be disabled after setting to false")
+
+	// Test that CheckAccessList works normally when failsafe is disabled
+	err = b.CheckAccessList(context.Background(), []common.Hash{}, types.LocalUnsafe, types.ExecutingDescriptor{})
+	require.NoError(t, err, "CheckAccessList should work normally when failsafe is disabled")
+}
+
+// TestFailsafeEnabledConfigInitialization confirms the configured failsafe state is correctly initialized
+func TestFailsafeEnabledConfigInitialization(t *testing.T) {
+	logger := testlog.Logger(t, log.LvlInfo)
+	m := metrics.NoopMetrics
+	dataDir := t.TempDir()
+	fullCfgSet := fullConfigSet(t, 1)
+
+	testCases := []struct {
+		name            string
+		failsafeEnabled bool
+	}{
+		{
+			name:            "FailsafeEnabled",
+			failsafeEnabled: true,
+		},
+		{
+			name:            "FailsafeDisabled",
+			failsafeEnabled: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Version:               "test",
+				FullConfigSetSource:   fullCfgSet,
+				SynchronousProcessors: true,
+				MockRun:               false,
+				SyncSources:           &syncnode.CLISyncNodes{},
+				Datadir:               dataDir,
+				FailsafeEnabled:       tc.failsafeEnabled,
+			}
+
+			ex := event.NewGlobalSynchronous(context.Background())
+			b, err := NewSupervisorBackend(context.Background(), logger, m, cfg, ex)
+			require.NoError(t, err)
+
+			// Verify that failsafe state matches config after initialization
+			enabled, err := b.GetFailsafeEnabled(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.failsafeEnabled, enabled, "failsafe state should match config setting")
+		})
+	}
+}
+
+func TestFailsafeOnInvalidation(t *testing.T) {
+	logger := testlog.Logger(t, log.LvlInfo)
+	m := metrics.NoopMetrics
+	dataDir := t.TempDir()
+	fullCfgSet := fullConfigSet(t, 1)
+
+	testCases := []struct {
+		name                   string
+		failsafeOnInvalidation bool
+		expectFailsafeEnabled  bool
+	}{
+		{
+			name:                   "FailsafeOnInvalidationEnabled",
+			failsafeOnInvalidation: true,
+		},
+		{
+			name:                   "FailsafeOnInvalidationDisabled",
+			failsafeOnInvalidation: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Version:                "test",
+				FullConfigSetSource:    fullCfgSet,
+				SynchronousProcessors:  true,
+				MockRun:                false,
+				SyncSources:            &syncnode.CLISyncNodes{},
+				Datadir:                dataDir,
+				FailsafeEnabled:        false, // Start with failsafe disabled
+				FailsafeOnInvalidation: tc.failsafeOnInvalidation,
+			}
+
+			ex := event.NewGlobalSynchronous(context.Background())
+			b, err := NewSupervisorBackend(context.Background(), logger, m, cfg, ex)
+			require.NoError(t, err)
+
+			// Verify that failsafe starts disabled
+			enabled, err := b.GetFailsafeEnabled(context.Background())
+			require.NoError(t, err)
+			require.False(t, enabled, "failsafe should start disabled")
+
+			// Emit InvalidateLocalSafeEvent
+			b.OnEvent(context.Background(), superevents.InvalidateLocalSafeEvent{
+				ChainID: eth.ChainIDFromUInt64(testChainIDOffset),
+			})
+
+			// Verify that failsafe state matches expectation
+			enabled, err = b.GetFailsafeEnabled(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.failsafeOnInvalidation, enabled, "failsafe state should match FailsafeOnInvalidation setting")
+		})
+	}
 }

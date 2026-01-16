@@ -20,7 +20,6 @@ import (
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/oppprof"
 	oprpc "github.com/ethereum-optimism/optimism/op-service/rpc"
-	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-service/sources/batching"
 	"github.com/ethereum-optimism/optimism/op-service/txmgr"
 
@@ -39,7 +38,6 @@ type ProposerConfig struct {
 	// How frequently to post L2 outputs when the DisputeGameFactory is configured
 	ProposalInterval time.Duration
 
-	L2OutputOracleAddr     *common.Address
 	DisputeGameFactoryAddr *common.Address
 	DisputeGameType        uint32
 
@@ -97,7 +95,6 @@ func (ps *ProposerService) initFromCLIConfig(ctx context.Context, version string
 	ps.AllowNonFinalized = cfg.AllowNonFinalized
 	ps.WaitNodeSync = cfg.WaitNodeSync
 
-	ps.initL2ooAddress(cfg)
 	ps.initDGF(cfg)
 
 	if err := ps.initRPCClients(ctx, cfg); err != nil {
@@ -148,12 +145,11 @@ func (ps *ProposerService) initRPCClients(ctx context.Context, cfg *CLIConfig) e
 	if len(cfg.SupervisorRpcs) != 0 {
 		var clients []source.SupervisorClient
 		for _, url := range cfg.SupervisorRpcs {
-			supervisorRpc, err := dial.DialRPCClientWithTimeout(ctx, dial.DefaultDialTimeout, ps.Log, url)
+			cl, err := dial.DialSupervisorClientWithTimeout(ctx, ps.Log, url,
+				client.WithRPCRecorder(ps.Metrics.NewRecorder("supervisor")))
 			if err != nil {
 				return fmt.Errorf("failed to dial supervisor RPC client (%v): %w", url, err)
 			}
-			cl := sources.NewSupervisorClient(client.NewBaseRPCClient(supervisorRpc,
-				client.WithRPCRecorder(ps.Metrics.NewRecorder("supervisor"))))
 			clients = append(clients, cl)
 		}
 		ps.ProposalSource = source.NewSupervisorProposalSource(ps.Log, clients...)
@@ -220,15 +216,6 @@ func (ps *ProposerService) initMetricsServer(cfg *CLIConfig) error {
 	ps.Log.Info("Started metrics server", "addr", metricsSrv.Addr())
 	ps.metricsSrv = metricsSrv
 	return nil
-}
-
-func (ps *ProposerService) initL2ooAddress(cfg *CLIConfig) {
-	l2ooAddress, err := opservice.ParseAddress(cfg.L2OOAddress)
-	if err != nil {
-		// Return no error & set no L2OO related configuration fields.
-		return
-	}
-	ps.L2OutputOracleAddr = &l2ooAddress
 }
 
 func (ps *ProposerService) initDGF(cfg *CLIConfig) {

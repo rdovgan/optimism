@@ -13,7 +13,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/txmgr"
 )
 
-var DefaulFaucetTxManagerValues = txmgr.DefaultFlagValues{
+var DefaultFaucetTxManagerValues = txmgr.DefaultFlagValues{
 	NumConfirmations:          uint64(1),
 	SafeAbortNonceTooLowCount: uint64(3),
 	FeeLimitMultiplier:        uint64(5),
@@ -23,7 +23,7 @@ var DefaulFaucetTxManagerValues = txmgr.DefaultFlagValues{
 	ResubmissionTimeout:       24 * time.Second,
 	NetworkTimeout:            10 * time.Second,
 	TxSendTimeout:             2 * time.Minute,
-	TxNotInMempoolTimeout:     1 * time.Minute,
+	TxNotInMempoolTimeout:     90 * time.Second,
 	ReceiptQueryInterval:      200 * time.Millisecond,
 }
 
@@ -48,7 +48,7 @@ type FaucetEntry struct {
 }
 
 func (f *FaucetEntry) TxManagerConfig(logger log.Logger) (*txmgr.Config, error) {
-	cfg := txmgr.NewCLIConfig(f.ELRPC.Value.RPC(), DefaulFaucetTxManagerValues)
+	cfg := txmgr.NewCLIConfig(f.ELRPC.Value.RPC(), DefaultFaucetTxManagerValues)
 
 	cfg.PrivateKey = f.TxCfg.PrivateKey
 

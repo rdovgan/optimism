@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 
+	"github.com/BurntSushi/toml"
+	"github.com/ethereum-optimism/optimism/devnet-sdk/telemetry"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/deploy"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis"
+	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/sources/inspect"
 	autofixTypes "github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/types"
+	"github.com/honeycombio/otel-config-go/otelconfig"
 	"github.com/urfave/cli/v2"
 )
 
@@ -19,6 +24,7 @@ type config struct {
 	kurtosisPackage string
 	enclave         string
 	environment     string
+	conductorConfig string
 	dryRun          bool
 	baseDir         string
 	kurtosisBinary  string
@@ -32,6 +38,7 @@ func newConfig(c *cli.Context) (*config, error) {
 		kurtosisPackage: c.String("kurtosis-package"),
 		enclave:         c.String("enclave"),
 		environment:     c.String("environment"),
+		conductorConfig: c.String("conductor-config"),
 		dryRun:          c.Bool("dry-run"),
 		kurtosisBinary:  c.String("kurtosis-binary"),
 		autofix:         c.String("autofix"),
@@ -66,6 +73,38 @@ func writeEnvironment(path string, env *kurtosis.KurtosisEnvironment) error {
 	return nil
 }
 
+func writeConductorConfig(path string, enclaveName string) error {
+	if path == "" {
+		return nil
+	}
+
+	ctx := context.Background()
+	conductorConfig, err := inspect.ExtractConductorConfig(ctx, enclaveName)
+	if err != nil {
+		log.Printf("Warning: Could not extract conductor config: %v", err)
+		return nil
+	}
+
+	if conductorConfig == nil {
+		log.Println("No conductor services found, skipping conductor config generation")
+		return nil
+	}
+
+	out, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("error creating conductor config file: %w", err)
+	}
+	defer out.Close()
+
+	encoder := toml.NewEncoder(out)
+	if err := encoder.Encode(conductorConfig); err != nil {
+		return fmt.Errorf("error encoding conductor config as TOML: %w", err)
+	}
+
+	log.Printf("Conductor configuration saved to: %s", path)
+	return nil
+}
+
 func printAutofixMessage() {
 	fmt.Println("Trouble with your devnet? Try Autofix!")
 	fmt.Println("Set AUTOFIX=true to automatically fix common configuration issues.")
@@ -80,6 +119,18 @@ func printWelcomeMessage() {
 }
 
 func mainAction(c *cli.Context) error {
+	ctx := c.Context
+
+	ctx, shutdown, err := telemetry.SetupOpenTelemetry(
+		ctx,
+		otelconfig.WithServiceName(c.App.Name),
+		otelconfig.WithServiceVersion(c.App.Version),
+	)
+	if err != nil {
+		return fmt.Errorf("error setting up OpenTelemetry: %w", err)
+	}
+	defer shutdown()
+
 	// Only show welcome message if not showing help or version
 	if !c.Bool("help") && !c.Bool("version") && c.NArg() == 0 {
 		printWelcomeMessage()
@@ -115,7 +166,7 @@ func mainAction(c *cli.Context) error {
 		return fmt.Errorf("error creating deployer: %w", err)
 	}
 
-	env, err := deployer.Deploy(c.Context, nil)
+	env, err := deployer.Deploy(ctx, nil)
 	if err != nil {
 		if autofixMode == autofixTypes.AutofixModeDisabled {
 			printAutofixMessage()
@@ -123,7 +174,17 @@ func mainAction(c *cli.Context) error {
 		return fmt.Errorf("error deploying environment: %w", err)
 	}
 
-	return writeEnvironment(cfg.environment, env)
+	// Write environment JSON file
+	if err := writeEnvironment(cfg.environment, env); err != nil {
+		return fmt.Errorf("error writing environment file: %w", err)
+	}
+
+	// Write conductor configuration TOML file
+	if err := writeConductorConfig(cfg.conductorConfig, cfg.enclave); err != nil {
+		return fmt.Errorf("error writing conductor config file: %w", err)
+	}
+
+	return nil
 }
 
 func getFlags() []cli.Flag {
@@ -150,6 +211,10 @@ func getFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:  "environment",
 			Usage: "Path to JSON environment file output (optional)",
+		},
+		&cli.StringFlag{
+			Name:  "conductor-config",
+			Usage: "Path to TOML conductor configuration file output (optional)",
 		},
 		&cli.BoolFlag{
 			Name:  "dry-run",

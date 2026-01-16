@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
-import { Test } from "forge-std/Test.sol";
+// Testing
+import { Test } from "test/setup/Test.sol";
+
+// Scripts
+import { DeployMIPS2 } from "scripts/deploy/DeployMIPS2.s.sol";
+import { StandardConstants } from "scripts/deploy/StandardConstants.sol";
+
+// Contracts
+import { MIPS64 } from "src/cannon/MIPS64.sol";
 
 // Interfaces
 import { IPreimageOracle } from "interfaces/cannon/IPreimageOracle.sol";
-
-import { DeployMIPS2 } from "scripts/deploy/DeployMIPS2.s.sol";
-import { MIPS } from "src/cannon/MIPS.sol";
-import { MIPS64 } from "src/cannon/MIPS64.sol";
 
 contract DeployMIPS2_Test is Test {
     DeployMIPS2 deployMIPS;
@@ -21,27 +25,9 @@ contract DeployMIPS2_Test is Test {
         deployMIPS = new DeployMIPS2();
     }
 
-    function testFuzz_run_mipsVersion1_succeeds(DeployMIPS2.Input memory _input) public {
-        vm.assume(address(_input.preimageOracle) != address(0));
-        _input.mipsVersion = 1;
-
-        // Run the deployment script.
-        DeployMIPS2.Output memory output1 = deployMIPS.run(_input);
-
-        // Make sure we deployed the correct MIPS
-        MIPS mips = new MIPS(_input.preimageOracle);
-        assertEq(address(output1.mipsSingleton).code, address(mips).code, "100");
-
-        // Run the deployment script again
-        DeployMIPS2.Output memory output2 = deployMIPS.run(_input);
-
-        // Make sure the contract did not get redeployed
-        assertEq(address(output1.mipsSingleton), address(output2.mipsSingleton), "200");
-    }
-
     function testFuzz_run_mipsVersion2_succeeds(DeployMIPS2.Input memory _input) public {
         vm.assume(address(_input.preimageOracle) != address(0));
-        _input.mipsVersion = 6;
+        _input.mipsVersion = StandardConstants.MIPS_VERSION;
 
         // Run the deployment script.
         DeployMIPS2.Output memory output1 = deployMIPS.run(_input);

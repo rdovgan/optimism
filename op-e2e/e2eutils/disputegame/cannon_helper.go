@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-challenger/game/fault/trace/utils"
 	"github.com/ethereum-optimism/optimism/op-challenger/game/fault/types"
 	keccakTypes "github.com/ethereum-optimism/optimism/op-challenger/game/keccak/types"
+	gameTypes "github.com/ethereum-optimism/optimism/op-challenger/game/types"
 	"github.com/ethereum-optimism/optimism/op-challenger/metrics"
 	"github.com/ethereum-optimism/optimism/op-e2e/bindings"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/challenger"
@@ -465,7 +466,7 @@ func (g *CannonHelper) createCannonTraceProvider(ctx context.Context, l2Node str
 		localContext = split.CreateLocalContext(pre, post)
 		dir := filepath.Join(cfg.Datadir, "cannon-trace")
 		subdir := filepath.Join(dir, localContext.Hex())
-		return cannon.NewTraceProviderForTest(logger, metrics.NoopMetrics.ToTypedVmMetrics(types.TraceTypeCannon.String()), cfg, localInputs, subdir, g.splitGame.MaxDepth(ctx)-splitDepth-1), nil
+		return cannon.NewTraceProviderForTest(logger, metrics.NoopMetrics.ToTypedVmMetrics(gameTypes.CannonGameType.String()), cfg, localInputs, subdir, g.splitGame.MaxDepth(ctx)-splitDepth-1), nil
 	})
 
 	claims, err := g.splitGame.Game.GetAllClaims(ctx, rpcblock.Latest)
@@ -541,6 +542,40 @@ func traceBisection(
 		} else {
 			t.Logf("Bisecting: Attack incorrect. newPosition=%v execIndexAtDepth=%v", newPosition, newPosition.TraceIndex(execDepth))
 			return claim.Attack(ctx, common.Hash{0xbb})
+		}
+	}
+}
+
+// topGameBisection performs a bisection of the trace for the top game.
+// It should not be used to bisect a bottom claim.
+func topGameTraceBisection(
+	t *testing.T,
+	ctx context.Context,
+	claim *ClaimHelper,
+	splitDepth types.Depth,
+	targetTraceIndex uint64,
+	provider types.TraceProvider,
+) *ClaimHelper {
+	require.True(t, claim.IsOutputRoot(ctx), "bisecting a bottom claim is not supported")
+
+	claimTraceIndex := claim.Position.TraceIndex(splitDepth).Uint64()
+	if claimTraceIndex < targetTraceIndex {
+		newPosition := claim.Position.Defend()
+		if newPosition.TraceIndex(splitDepth).Uint64() < targetTraceIndex {
+			response, err := provider.Get(ctx, newPosition)
+			require.NoError(t, err)
+			return claim.Defend(ctx, response)
+		} else {
+			return claim.Defend(ctx, common.Hash{0xaa})
+		}
+	} else {
+		newPosition := claim.Position.Attack()
+		if newPosition.TraceIndex(splitDepth).Uint64() < targetTraceIndex {
+			response, err := provider.Get(ctx, newPosition)
+			require.NoError(t, err)
+			return claim.Attack(ctx, response)
+		} else {
+			return claim.Attack(ctx, common.Hash{0xaa})
 		}
 	}
 }

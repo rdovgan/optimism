@@ -10,8 +10,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/endpoint"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
 	"github.com/ethereum-optimism/optimism/op-test-sequencer/sequencer/backend/work"
 	"github.com/ethereum-optimism/optimism/op-test-sequencer/sequencer/seqtypes"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 type Config struct {
@@ -22,6 +24,8 @@ type Config struct {
 	L2EL endpoint.MustRPC `yaml:"l2EL"`
 	// L2 consensus-layer RPC endpoint
 	L2CL endpoint.MustRPC `yaml:"l2CL"`
+
+	L1ChainConfig *params.ChainConfig
 }
 
 func (c *Config) Start(ctx context.Context, id seqtypes.BuilderID, opts *work.ServiceOpts) (work.Builder, error) {
@@ -48,7 +52,7 @@ func (c *Config) Start(ctx context.Context, id seqtypes.BuilderID, opts *work.Se
 	onClose.Stack(l1ELRPCClient.Close)
 
 	rolCl := sources.NewRollupClient(l2CLRPCClient)
-	cfg, err := retry.Do(ctx, 0, retry.Exponential(), func() (*rollup.Config, error) {
+	cfg, err := retry.Do(ctx, 10, retry.Exponential(), func() (*rollup.Config, error) {
 		opts.Log.Info("Fetching rollup-config for block-building")
 		cfg, err := rolCl.RollupConfig(ctx)
 		if err != nil {
@@ -60,8 +64,24 @@ func (c *Config) Start(ctx context.Context, id seqtypes.BuilderID, opts *work.Se
 		return nil, err
 	}
 
+	var depSet depset.DependencySet
+	// Dependency set is only required if interop is scheduled and the RPC may not be available before then.
+	if cfg.InteropTime != nil {
+		depSet, err = retry.Do(ctx, 10, retry.Exponential(), func() (depset.DependencySet, error) {
+			opts.Log.Info("Fetching dependency set for block-building")
+			depSet, err := rolCl.DependencySet(ctx)
+			if err != nil {
+				opts.Log.Warn("Failed to fetch dependency set", "err", err)
+			}
+			return depSet, err
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	l1Cl, err := sources.NewL1Client(l1ELRPCClient, opts.Log, nil,
-		sources.L1ClientSimpleConfig(false, sources.RPCKindAny, 10))
+		sources.L1ClientSimpleConfig(false, sources.RPCKindStandard, 10))
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +90,10 @@ func (c *Config) Start(ctx context.Context, id seqtypes.BuilderID, opts *work.Se
 	if err != nil {
 		return nil, err
 	}
-	fb := derive.NewFetchingAttributesBuilder(cfg, l1Cl, l2Cl)
+	fb := derive.NewFetchingAttributesBuilder(cfg, c.L1ChainConfig, depSet, l1Cl, l2Cl)
+
+	fb.TestSkipL1OriginCheck()
+
 	cl := sources.NewOPStackClient(l2CLRPCClient)
 	cancelCloseEarly()
 	return &Builder{

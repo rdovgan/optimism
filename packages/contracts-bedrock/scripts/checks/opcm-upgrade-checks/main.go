@@ -11,7 +11,6 @@ import (
 )
 
 var OPCM_ARTIFACT_PATH = "forge-artifacts/OPContractsManager.sol/OPContractsManagerUpgrader.json"
-var OPCM_UPGRADE_FUNCTION_SELECTOR = "ff2dd5a1"
 
 type InternalUpgradeFunctionType struct {
 	name     string
@@ -37,7 +36,7 @@ func main() {
 	// Process.
 	if _, err := common.ProcessFilesGlob(
 		[]string{"forge-artifacts/**/*.json"},
-		[]string{"forge-artifacts/OPContractsManager.sol/*.json"},
+		[]string{"forge-artifacts/OPContractsManager.sol/*.json", "forge-artifacts/OPContractsManagerV2.sol/*.json", "forge-artifacts/OPContractsManagerUtils.sol/*.json", "forge-artifacts/opcm/**/*.json"},
 		processFile,
 	); err != nil {
 		fmt.Printf("error: %v\n", err)
@@ -108,17 +107,35 @@ func processFile(artifactPath string) (*common.Void, []error) {
 		return nil, []error{err}
 	}
 
-	// Get the AST of OPCM's upgrade function.
-	opcmUpgradeAst := getOpcmUpgradeFunctionAst(opcmAst)
-
 	// Check that there is a call to contract.upgrade.
 	contractName := strings.Split(filepath.Base(artifactPath), ".")[0]
 	typeName := "contract I" + contractName
 
-	callType := upgradesContract(opcmUpgradeAst.Body.Statements, "upgrade", typeName, InternalUpgradeFunctionType{
-		name:     "upgradeToAndCall",
-		typeName: "function (contract IProxyAdmin,address,address,bytes memory)",
-	})
+	var callType CallType
+	if contractName == "SuperchainConfig" {
+		// Get the AST of OPCM's upgradeSuperchainConfig function.
+		opcmUpgradeSuperchainConfigAst, err := getOpcmUpgradeFunctionAst(opcmAst, "upgradeSuperchainConfig")
+		if err != nil {
+			return nil, []error{err}
+		}
+
+		callType = upgradesContract(opcmUpgradeSuperchainConfigAst.Body.Statements, "upgrade", typeName, InternalUpgradeFunctionType{
+			name:     "upgradeToAndCall",
+			typeName: "function (contract IProxyAdmin,address,address,bytes memory)",
+		})
+	} else {
+		// Get the AST of OPCM's upgrade function.
+		opcmUpgradeAst, err := getOpcmUpgradeFunctionAst(opcmAst, "_doChainUpgrade")
+		if err != nil {
+			return nil, []error{err}
+		}
+
+		callType = upgradesContract(opcmUpgradeAst.Body.Statements, "upgrade", typeName, InternalUpgradeFunctionType{
+			name:     "upgradeToAndCall",
+			typeName: "function (contract IProxyAdmin,address,address,bytes memory)",
+		})
+	}
+
 	if callType == NOT_FOUND {
 		return nil, []error{fmt.Errorf("OPCM upgrade function does not call %v.upgrade", contractName)}
 	}
@@ -290,26 +307,32 @@ func identifyValidInternalUpgradeCall(expression *solc.Expression, internalFunct
 }
 
 // Get the AST of OPCM's upgrade function.
-func getOpcmUpgradeFunctionAst(opcmArtifact *solc.ForgeArtifact) *solc.AstNode {
-	opcmUpgradeAst := solc.AstNode{}
+// Returns an error if zero or more than one external upgrade function is found.
+func getOpcmUpgradeFunctionAst(opcmArtifact *solc.ForgeArtifact, upgradeFunctionName string) (*solc.AstNode, error) {
+	opcmUpgradeFunctions := []solc.AstNode{}
 	for _, astNode := range opcmArtifact.Ast.Nodes {
 		if astNode.NodeType == "ContractDefinition" && astNode.Name == "OPContractsManagerUpgrader" {
 			for _, node := range astNode.Nodes {
 				if node.NodeType == "FunctionDefinition" &&
-					node.Name == "upgrade" &&
-					node.Visibility == "external" &&
-					node.FunctionSelector == OPCM_UPGRADE_FUNCTION_SELECTOR {
-					opcmUpgradeAst = node
-					break
+					node.Name == upgradeFunctionName {
+					opcmUpgradeFunctions = append(opcmUpgradeFunctions, node)
 				}
 			}
 		}
 	}
 
-	return &opcmUpgradeAst
+	if len(opcmUpgradeFunctions) == 0 {
+		return nil, fmt.Errorf("no external %s function found in OPContractsManagerUpgrader", upgradeFunctionName)
+	}
+
+	if len(opcmUpgradeFunctions) > 1 {
+		return nil, fmt.Errorf("multiple external %s functions found in OPContractsManagerUpgrader, expected 1", upgradeFunctionName)
+	}
+
+	return &opcmUpgradeFunctions[0], nil
 }
 
-// Get the first upgrade function from the input artifact.
+// Get the number of upgrade functions from the input artifact.
 func getNumberOfUpgradeFunctions(artifact *solc.ForgeArtifact) int {
 	upgradeFunctions := []solc.AstNode{}
 	for _, astNode := range artifact.Ast.Nodes {

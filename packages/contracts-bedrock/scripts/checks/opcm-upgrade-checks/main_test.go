@@ -10,12 +10,14 @@ import (
 
 func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 	tests := []struct {
-		name         string
-		opcmArtifact *solc.ForgeArtifact
-		expectedAst  *solc.AstNode
+		name                string
+		opcmArtifact        *solc.ForgeArtifact
+		upgradeFunctionName string
+		expectedAst         *solc.AstNode
+		expectedError       string
 	}{
 		{
-			name: "With upgrade function",
+			name: "With one _doChainUpgrade function",
 			opcmArtifact: &solc.ForgeArtifact{
 				Ast: solc.Ast{
 					Nodes: []solc.AstNode{
@@ -23,10 +25,9 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 							NodeType: "ContractDefinition",
 							Nodes: []solc.AstNode{
 								{
-									NodeType:         "FunctionDefinition",
-									Name:             "upgrade",
-									Visibility:       "external",
-									FunctionSelector: OPCM_UPGRADE_FUNCTION_SELECTOR,
+									NodeType:   "FunctionDefinition",
+									Name:       "_doChainUpgrade",
+									Visibility: "external",
 									Nodes: []solc.AstNode{
 										{
 											NodeType: "UniqueNonExistentNodeType",
@@ -39,20 +40,21 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 					},
 				},
 			},
+			upgradeFunctionName: "_doChainUpgrade",
 			expectedAst: &solc.AstNode{
-				NodeType:         "FunctionDefinition",
-				Name:             "upgrade",
-				Visibility:       "external",
-				FunctionSelector: OPCM_UPGRADE_FUNCTION_SELECTOR,
+				NodeType:   "FunctionDefinition",
+				Name:       "_doChainUpgrade",
+				Visibility: "external",
 				Nodes: []solc.AstNode{
 					{
 						NodeType: "UniqueNonExistentNodeType",
 					},
 				},
 			},
+			expectedError: "",
 		},
 		{
-			name: "With an upgrade function but not the right visibility",
+			name: "With a _doChainUpgrade function but public visibility",
 			opcmArtifact: &solc.ForgeArtifact{
 				Ast: solc.Ast{
 					Nodes: []solc.AstNode{
@@ -60,15 +62,9 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 							NodeType: "ContractDefinition",
 							Nodes: []solc.AstNode{
 								{
-									NodeType:         "FunctionDefinition",
-									Name:             "upgrade",
-									Visibility:       "public",
-									FunctionSelector: OPCM_UPGRADE_FUNCTION_SELECTOR,
-									Nodes: []solc.AstNode{
-										{
-											NodeType: "UniqueNonExistentNodeType",
-										},
-									},
+									NodeType:   "FunctionDefinition",
+									Name:       "_doChainUpgrade",
+									Visibility: "public",
 								},
 							},
 							Name: "OPContractsManagerUpgrader",
@@ -76,10 +72,16 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 					},
 				},
 			},
-			expectedAst: &solc.AstNode{},
+			upgradeFunctionName: "_doChainUpgrade",
+			expectedAst: &solc.AstNode{
+				NodeType:   "FunctionDefinition",
+				Name:       "_doChainUpgrade",
+				Visibility: "public",
+			},
+			expectedError: "",
 		},
 		{
-			name: "With an upgrade function but not the right function selector",
+			name: "With a _doChainUpgrade function and irrelevant function selector",
 			opcmArtifact: &solc.ForgeArtifact{
 				Ast: solc.Ast{
 					Nodes: []solc.AstNode{
@@ -88,7 +90,7 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 							Nodes: []solc.AstNode{
 								{
 									NodeType:         "FunctionDefinition",
-									Name:             "upgrade",
+									Name:             "_doChainUpgrade",
 									Visibility:       "external",
 									FunctionSelector: "aabbccdd",
 									Nodes: []solc.AstNode{
@@ -103,10 +105,22 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 					},
 				},
 			},
-			expectedAst: &solc.AstNode{},
+			upgradeFunctionName: "_doChainUpgrade",
+			expectedAst: &solc.AstNode{
+				NodeType:         "FunctionDefinition",
+				Name:             "_doChainUpgrade",
+				Visibility:       "external",
+				FunctionSelector: "aabbccdd",
+				Nodes: []solc.AstNode{
+					{
+						NodeType: "UniqueNonExistentNodeType",
+					},
+				},
+			},
+			expectedError: "",
 		},
 		{
-			name: "With no upgrade function",
+			name: "With multiple _doChainUpgrade functions",
 			opcmArtifact: &solc.ForgeArtifact{
 				Ast: solc.Ast{
 					Nodes: []solc.AstNode{
@@ -114,10 +128,37 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 							NodeType: "ContractDefinition",
 							Nodes: []solc.AstNode{
 								{
-									NodeType:         "FunctionDefinition",
-									Name:             "randomFunctionName",
-									Visibility:       "external",
-									FunctionSelector: OPCM_UPGRADE_FUNCTION_SELECTOR,
+									NodeType:   "FunctionDefinition",
+									Name:       "_doChainUpgrade",
+									Visibility: "external",
+								},
+								{
+									NodeType:   "FunctionDefinition",
+									Name:       "_doChainUpgrade",
+									Visibility: "external",
+								},
+							},
+							Name: "OPContractsManagerUpgrader",
+						},
+					},
+				},
+			},
+			upgradeFunctionName: "_doChainUpgrade",
+			expectedAst:         nil,
+			expectedError:       "multiple external _doChainUpgrade functions found in OPContractsManagerUpgrader, expected 1",
+		},
+		{
+			name: "With no _doChainUpgrade function",
+			opcmArtifact: &solc.ForgeArtifact{
+				Ast: solc.Ast{
+					Nodes: []solc.AstNode{
+						{
+							NodeType: "ContractDefinition",
+							Nodes: []solc.AstNode{
+								{
+									NodeType:   "FunctionDefinition",
+									Name:       "randomFunctionName",
+									Visibility: "external",
 									Nodes: []solc.AstNode{
 										{
 											NodeType: "UniqueNonExistentNodeType",
@@ -130,7 +171,9 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 					},
 				},
 			},
-			expectedAst: &solc.AstNode{},
+			upgradeFunctionName: "_doChainUpgrade",
+			expectedAst:         nil,
+			expectedError:       "no external _doChainUpgrade function found in OPContractsManagerUpgrader",
 		},
 		{
 			name: "With no contract definition",
@@ -139,14 +182,26 @@ func TestGetOpcmUpgradeFunctionAst(t *testing.T) {
 					Nodes: []solc.AstNode{},
 				},
 			},
-			expectedAst: &solc.AstNode{},
+			upgradeFunctionName: "_doChainUpgrade",
+			expectedAst:         nil,
+			expectedError:       "no external _doChainUpgrade function found in OPContractsManagerUpgrader",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ast := getOpcmUpgradeFunctionAst(test.opcmArtifact)
-			assert.Equal(t, test.expectedAst, ast)
+			ast, err := getOpcmUpgradeFunctionAst(test.opcmArtifact, test.upgradeFunctionName)
+
+			if test.expectedError == "" {
+				assert.NoError(t, err)
+				assert.Equal(t, test.expectedAst, ast)
+			} else {
+				assert.Error(t, err)
+				assert.Nil(t, ast)
+				if err != nil {
+					assert.Equal(t, test.expectedError, err.Error())
+				}
+			}
 		})
 	}
 }

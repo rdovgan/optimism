@@ -71,9 +71,6 @@ func TestNewSystemFromEnv(t *testing.T) {
 						"defaultl2": common.HexToAddress("0x456"),
 					},
 				},
-				L1Addresses: descriptors.AddressMap{
-					"defaultl1": common.HexToAddress("0x123"),
-				},
 				L1Wallets: descriptors.WalletMap{
 					"default": &descriptors.Wallet{
 						Address:    common.HexToAddress("0x123"),
@@ -142,9 +139,6 @@ func TestSystemFromDevnet(t *testing.T) {
 								"default": testWallet,
 							},
 						},
-						L1Addresses: descriptors.AddressMap{
-							"defaultl1": common.HexToAddress("0x123"),
-						},
 						L1Wallets: descriptors.WalletMap{
 							"default": testWallet,
 						},
@@ -175,20 +169,19 @@ func TestSystemFromDevnet(t *testing.T) {
 							Wallets: descriptors.WalletMap{
 								"default": testWallet,
 							},
-							Services: descriptors.ServiceMap{
-								"supervisor": &descriptors.Service{
-									Name: "supervisor",
-									Endpoints: descriptors.EndpointMap{
-										"rpc": &descriptors.PortInfo{
-											Host: "localhost",
-											Port: 8545,
+							Services: descriptors.RedundantServiceMap{
+								"supervisor": []*descriptors.Service{
+									&descriptors.Service{
+										Name: "supervisor",
+										Endpoints: descriptors.EndpointMap{
+											"rpc": &descriptors.PortInfo{
+												Host: "localhost",
+												Port: 8545,
+											},
 										},
 									},
 								},
 							},
-						},
-						L1Addresses: descriptors.AddressMap{
-							"defaultl1": common.HexToAddress("0x123"),
 						},
 						L1Wallets: descriptors.WalletMap{
 							"default": testWallet,

@@ -23,12 +23,12 @@ import (
 var ErrInvalidBlockReplacement = errors.New("invalid block replacement error")
 
 // ReceiptsToExecutingMessages returns the executing messages in the receipts indexed by their position in the log.
-func ReceiptsToExecutingMessages(depset depset.ChainIndexFromID, receipts ethtypes.Receipts) (map[uint32]*supervisortypes.ExecutingMessage, uint32, error) {
+func ReceiptsToExecutingMessages(receipts ethtypes.Receipts) (map[uint32]*supervisortypes.ExecutingMessage, uint32, error) {
 	execMsgs := make(map[uint32]*supervisortypes.ExecutingMessage)
 	var curr uint32
 	for _, rcpt := range receipts {
 		for _, l := range rcpt.Logs {
-			execMsg, err := processors.DecodeExecutingMessageLog(l, depset)
+			execMsg, err := processors.DecodeExecutingMessageLog(l)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -147,16 +147,19 @@ func singleRoundConsolidation(
 	tasks taskExecutor,
 ) error {
 	// The depset is the same for all chains. So it suffices to use any chain ID
-	depset, err := bootInfo.Configs.DependencySet(superRoot.Chains[0].ChainID)
+	depSet, err := bootInfo.Configs.DependencySet(superRoot.Chains[0].ChainID)
 	if err != nil {
 		return fmt.Errorf("failed to get dependency set: %w", err)
 	}
-	deps, err := newConsolidateCheckDeps(depset, bootInfo.Configs, consolidateState.TransitionState, superRoot.Chains, l2PreimageOracle, consolidateState)
+	deps, err := newConsolidateCheckDeps(depSet, bootInfo.Configs, consolidateState.TransitionState, superRoot.Chains, l2PreimageOracle, consolidateState)
 	if err != nil {
 		return fmt.Errorf("failed to create consolidate check deps: %w", err)
 	}
-	invalidChains := make(map[eth.ChainID]*ethtypes.Block)
-
+	fullConfig, err := getFullConfig(bootInfo.Configs, l1PreimageOracle, depSet)
+	if err != nil {
+		return fmt.Errorf("failed to get full config set: %w", err)
+	}
+	linker := depset.LinkerFromConfig(fullConfig)
 	for i, chain := range superRoot.Chains {
 		// Do not check chains that have been replaced with a deposits-only block.
 		// They are already cross-safe because deposits-only blocks cannot contain executing messages.
@@ -164,18 +167,7 @@ func singleRoundConsolidation(
 			continue
 		}
 
-		agreedOutput := l2PreimageOracle.OutputByRoot(common.Hash(chain.Output), chain.ChainID)
-		agreedOutputV0, ok := agreedOutput.(*eth.OutputV0)
-		if !ok {
-			return fmt.Errorf("%w: version: %d", l2.ErrUnsupportedL2Output, agreedOutput.Version())
-		}
-		agreedBlockHash := common.Hash(agreedOutputV0.BlockHash)
-
 		progress := consolidateState.PendingProgress[i]
-		// It's possible that the optimistic block is not canonical.
-		// So we use the blockDataByHash hint to trigger a block rebuild to ensure that the block data, including receipts, are available.
-		_ = l2PreimageOracle.BlockDataByHash(agreedBlockHash, progress.BlockHash, chain.ChainID)
-
 		optimisticBlock, _ := l2PreimageOracle.ReceiptsByBlockHash(progress.BlockHash, chain.ChainID)
 
 		candidate := supervisortypes.BlockSeal{
@@ -183,27 +175,17 @@ func singleRoundConsolidation(
 			Number:    optimisticBlock.NumberU64(),
 			Timestamp: optimisticBlock.Time(),
 		}
-		if err := checkHazards(logger, deps, candidate, chain.ChainID); err != nil {
+		if err := checkHazards(logger, deps, linker, candidate, chain.ChainID); err != nil {
 			if !isInvalidMessageError(err) {
 				return err
 			}
-			invalidChains[chain.ChainID] = optimisticBlock
-		}
-	}
-
-	if len(invalidChains) == 0 {
-		return nil
-	}
-
-	for i, chain := range superRoot.Chains {
-		if optimisticBlock, ok := invalidChains[chain.ChainID]; ok {
-			chainAgreedPrestate := superRoot.Chains[i]
+			// Invalid executing message found. Replace with a deposit only block
 			replacementBlockHash, outputRoot, err := buildDepositOnlyBlock(
 				logger,
 				bootInfo,
 				l1PreimageOracle,
 				l2PreimageOracle,
-				chainAgreedPrestate,
+				chain,
 				tasks,
 				optimisticBlock,
 				// Update the preimage oracle database with the replaced block data
@@ -218,21 +200,20 @@ func singleRoundConsolidation(
 				"replacedBlock", eth.ToBlockID(optimisticBlock),
 				"replacementBlockHash", replacementBlockHash,
 				"outputRoot", outputRoot,
-				"replacedOutputRoot", superRoot.Chains[i].Output,
+				"replacedOutputRoot", chain.Output,
 			)
 			superRoot.Chains[i].Output = outputRoot
 			consolidateState.setReplaced(i, chain.ChainID, outputRoot, replacementBlockHash)
+			// Indicate that there was an invalid block so we have to re-check all chains.
+			// The re-check will pick up invalid messages in any chains we haven't gotten to yet so don't waste time now.
+			return ErrInvalidBlockReplacement
 		}
 	}
-	return ErrInvalidBlockReplacement
+	return nil
 }
 
 func isInvalidMessageError(err error) bool {
-	// TODO(#14011): Create an error category for InvalidExecutingMessage errors in the cross package for easier maintenance.
-	return errors.Is(err, supervisortypes.ErrConflict) ||
-		errors.Is(err, cross.ErrExecMsgHasInvalidIndex) ||
-		errors.Is(err, cross.ErrExecMsgUnknownChain) ||
-		errors.Is(err, cross.ErrCycle) || errors.Is(err, supervisortypes.ErrUnknownChain)
+	return errors.Is(err, supervisortypes.ErrConflict) || errors.Is(err, supervisortypes.ErrUnknownChain)
 }
 
 type ConsolidateCheckDeps interface {
@@ -241,15 +222,12 @@ type ConsolidateCheckDeps interface {
 	cross.UnsafeStartDeps
 }
 
-func checkHazards(logger log.Logger, deps ConsolidateCheckDeps, candidate supervisortypes.BlockSeal, chainID eth.ChainID) error {
-	hazards, err := cross.CrossUnsafeHazards(deps, logger, chainID, candidate)
+func checkHazards(logger log.Logger, deps ConsolidateCheckDeps, linker depset.LinkChecker, candidate supervisortypes.BlockSeal, chainID eth.ChainID) error {
+	hazards, err := cross.CrossUnsafeHazards(deps, linker, logger, chainID, candidate)
 	if err != nil {
 		return err
 	}
-	if err := cross.HazardUnsafeFrontierChecks(deps, hazards); err != nil {
-		return err
-	}
-	if err := cross.HazardCycleChecks(deps.DependencySet(), deps, candidate.Timestamp, hazards); err != nil {
+	if err := cross.HazardCycleChecks(deps, candidate.Timestamp, hazards); err != nil {
 		return err
 	}
 	return nil
@@ -277,7 +255,10 @@ func newConsolidateCheckDeps(
 		progress := transitionState.PendingProgress[i]
 		// This is the optimistic head. It's OK if it's replaced by a deposits-only block.
 		// Because by then the replacement block won't be used for hazard checks.
-		head := oracle.BlockByHash(progress.BlockHash, chain.ChainID)
+		head, err := fetchOptimisticBlock(oracle, progress.BlockHash, chain)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch optimistic block for chain %v: %w", chain.ChainID, err)
+		}
 		blockByHash := func(hash common.Hash) *ethtypes.Block {
 			return oracle.BlockByHash(hash, chain.ChainID)
 		}
@@ -297,11 +278,23 @@ func newConsolidateCheckDeps(
 	}, nil
 }
 
+func fetchOptimisticBlock(oracle l2.Oracle, blockHash common.Hash, chain eth.ChainIDAndOutput) (*ethtypes.Block, error) {
+	agreedOutput := oracle.OutputByRoot(common.Hash(chain.Output), chain.ChainID)
+	agreedOutputV0, ok := agreedOutput.(*eth.OutputV0)
+	if !ok {
+		return nil, fmt.Errorf("%w: version: %d", l2.ErrUnsupportedL2Output, agreedOutput.Version())
+	}
+	return oracle.BlockDataByHash(agreedOutputV0.BlockHash, blockHash, chain.ChainID), nil
+}
+
 func (d *consolidateCheckDeps) Contains(chain eth.ChainID, query supervisortypes.ContainsQuery) (includedIn supervisortypes.BlockSeal, err error) {
 	// We can assume the oracle has the block the executing message is in
 	block, err := d.CanonBlockByNumber(d.oracle, query.BlockNum, chain)
 	if err != nil {
 		return supervisortypes.BlockSeal{}, err
+	}
+	if block.Time() != query.Timestamp {
+		return supervisortypes.BlockSeal{}, fmt.Errorf("block timestamp mismatch: %d != %d: %w", block.Time(), query.Timestamp, supervisortypes.ErrConflict)
 	}
 	_, receipts := d.oracle.ReceiptsByBlockHash(block.Hash(), chain)
 	var current uint32
@@ -317,8 +310,6 @@ func (d *consolidateCheckDeps) Contains(chain eth.ChainID, query supervisortypes
 				}.Checksum()
 				if checksum != query.Checksum {
 					return supervisortypes.BlockSeal{}, fmt.Errorf("checksum mismatch: %s != %s: %w", checksum, query.Checksum, supervisortypes.ErrConflict)
-				} else if block.Time() != query.Timestamp {
-					return supervisortypes.BlockSeal{}, fmt.Errorf("block timestamp mismatch: %d != %d: %w", block.Time(), query.Timestamp, supervisortypes.ErrConflict)
 				} else {
 					return supervisortypes.BlockSeal{
 						Hash:      block.Hash(),
@@ -376,16 +367,12 @@ func (d *consolidateCheckDeps) OpenBlock(
 	}
 
 	_, receipts := d.oracle.ReceiptsByBlockHash(block.Hash(), chainID)
-	execMsgs, logCount, err = ReceiptsToExecutingMessages(d.depset, receipts)
+	execMsgs, logCount, err = ReceiptsToExecutingMessages(receipts)
 	if err != nil {
 		return eth.BlockRef{}, 0, nil, err
 	}
 	d.consolidateState.setCachedExecMsgs(block.Hash(), execMsgs, logCount)
 	return ref, logCount, execMsgs, nil
-}
-
-func (d *consolidateCheckDeps) DependencySet() depset.DependencySet {
-	return d.depset
 }
 
 func (d *consolidateCheckDeps) CanonBlockByNumber(oracle l2.Oracle, blockNum uint64, chainID eth.ChainID) (*ethtypes.Block, error) {

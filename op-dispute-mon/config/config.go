@@ -12,10 +12,10 @@ import (
 )
 
 var (
-	ErrMissingL1EthRPC               = errors.New("missing l1 eth rpc url")
-	ErrMissingGameFactoryAddress     = errors.New("missing game factory address")
-	ErrMissingRollupAndSupervisorRpc = errors.New("must specify rollup rpc or supervisor rpc")
-	ErrMissingMaxConcurrency         = errors.New("missing max concurrency")
+	ErrMissingL1EthRPC              = errors.New("missing l1 eth rpc url")
+	ErrMissingGameFactoryAddress    = errors.New("missing game factory address")
+	ErrMissingRollupAndSuperNodeRpc = errors.New("must specify rollup rpc or super node rpc")
+	ErrMissingMaxConcurrency        = errors.New("missing max concurrency")
 )
 
 const (
@@ -39,8 +39,8 @@ type Config struct {
 	GameFactoryAddress common.Address // Address of the dispute game factory
 
 	HonestActors    []common.Address // List of honest actors to monitor claims for.
-	RollupRpc       string           // The rollup node RPC URL.
-	SupervisorRpc   string           // The supervisor RPC URL.
+	RollupRpcs      []string         // The rollup node RPC URLs.
+	SuperNodeRpcs   []string         // The super node RPC URLs.
 	MonitorInterval time.Duration    // Frequency to check for new games to monitor.
 	GameWindow      time.Duration    // Maximum window to look for games to monitor.
 	IgnoredGames    []common.Address // Games to exclude from monitoring
@@ -50,19 +50,19 @@ type Config struct {
 	PprofConfig   oppprof.CLIConfig
 }
 
-func NewInteropConfig(gameFactoryAddress common.Address, l1EthRpc string, supervisorRpc string) Config {
-	return NewCombinedConfig(gameFactoryAddress, l1EthRpc, "", supervisorRpc)
+func NewInteropConfig(gameFactoryAddress common.Address, l1EthRpc string, superNodeRpcs []string) Config {
+	return NewCombinedConfig(gameFactoryAddress, l1EthRpc, nil, superNodeRpcs)
 }
 
-func NewConfig(gameFactoryAddress common.Address, l1EthRpc string, rollupRpc string) Config {
-	return NewCombinedConfig(gameFactoryAddress, l1EthRpc, rollupRpc, "")
+func NewConfig(gameFactoryAddress common.Address, l1EthRpc string, rollupRpcs []string) Config {
+	return NewCombinedConfig(gameFactoryAddress, l1EthRpc, rollupRpcs, nil)
 }
 
-func NewCombinedConfig(gameFactoryAddress common.Address, l1EthRpc string, rollupRpc string, supervisorRpc string) Config {
+func NewCombinedConfig(gameFactoryAddress common.Address, l1EthRpc string, rollupRpcs []string, superNodeRpcs []string) Config {
 	return Config{
 		L1EthRpc:           l1EthRpc,
-		RollupRpc:          rollupRpc,
-		SupervisorRpc:      supervisorRpc,
+		RollupRpcs:         rollupRpcs,
+		SuperNodeRpcs:      superNodeRpcs,
 		GameFactoryAddress: gameFactoryAddress,
 
 		MonitorInterval: DefaultMonitorInterval,
@@ -78,8 +78,8 @@ func (c Config) Check() error {
 	if c.L1EthRpc == "" {
 		return ErrMissingL1EthRPC
 	}
-	if c.RollupRpc == "" && c.SupervisorRpc == "" {
-		return ErrMissingRollupAndSupervisorRpc
+	if len(c.RollupRpcs) == 0 && len(c.SuperNodeRpcs) == 0 {
+		return ErrMissingRollupAndSuperNodeRpc
 	}
 	if c.GameFactoryAddress == (common.Address{}) {
 		return ErrMissingGameFactoryAddress

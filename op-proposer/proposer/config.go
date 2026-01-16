@@ -49,8 +49,7 @@ type CLIConfig struct {
 	// L2OOAddress is the L2OutputOracle contract address.
 	L2OOAddress string
 
-	// PollInterval is the delay between querying L2 for more transaction
-	// and creating a new batch.
+	// PollInterval is the delay between periodic checks on whether it is time to load an output root and propose it.
 	PollInterval time.Duration
 
 	// AllowNonFinalized can be set to true to propose outputs
@@ -134,7 +133,6 @@ func NewConfig(ctx *cli.Context) *CLIConfig {
 		L1EthRpc:                     ctx.String(flags.L1EthRpcFlag.Name),
 		RollupRpc:                    ctx.String(flags.RollupRpcFlag.Name),
 		SupervisorRpcs:               ctx.StringSlice(flags.SupervisorRpcsFlag.Name),
-		L2OOAddress:                  ctx.String(flags.L2OOAddressFlag.Name),
 		PollInterval:                 ctx.Duration(flags.PollIntervalFlag.Name),
 		TxMgrConfig:                  txmgr.ReadCLIConfig(ctx),
 		AllowNonFinalized:            ctx.Bool(flags.AllowNonFinalizedFlag.Name),

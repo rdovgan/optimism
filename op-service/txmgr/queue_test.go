@@ -56,6 +56,10 @@ func (b *mockBackendWithNonce) NonceAt(ctx context.Context, account common.Addre
 	return uint64(len(b.minedTxs)), nil
 }
 
+func (b *mockBackendWithNonce) BlobBaseFee(ctx context.Context) (*big.Int, error) {
+	return big.NewInt(0), nil
+}
+
 func TestQueue_Send(t *testing.T) {
 	testCases := []struct {
 		name   string      // name of the test
@@ -170,19 +174,16 @@ func TestQueue_Send(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
+			backend := newMockBackendWithNonce(newGasPricer(3))
 			conf := configWithNumConfs(1)
 			conf.ReceiptQueryInterval = 1 * time.Second            // simulate a network send
-			conf.ResubmissionTimeout.Store(int64(2 * time.Second)) // resubmit to detect errors
+			conf.RebroadcastInterval.Store(int64(2 * time.Second)) // possibly rebroadcast once before resubmission if unconfirmed
+			conf.ResubmissionTimeout.Store(int64(3 * time.Second)) // resubmit to detect errors
 			conf.SafeAbortNonceTooLowCount = 1
-			backend := newMockBackendWithNonce(newGasPricer(3))
-			mgr := &SimpleTxManager{
-				chainID: conf.ChainID,
-				name:    "TEST",
-				cfg:     conf,
-				backend: backend,
-				l:       testlog.Logger(t, log.LevelCrit),
-				metr:    &metrics.NoopTxMetrics{},
-			}
+			conf.Backend = backend
+
+			mgr, err := NewSimpleTxManagerFromConfig("TEST", testlog.Logger(t, log.LevelCrit), &metrics.NoopTxMetrics{}, conf)
+			require.NoError(t, err)
 
 			// track the nonces, and return any expected errors from tx sending
 			var (
@@ -280,6 +281,8 @@ func newMockBackendWithConfirmationDelay(g *gasPricer, wg *sync.WaitGroup) *mock
 	b.g = g
 
 	sendTx := func(ctx context.Context, tx *types.Transaction) error {
+		b.mu.Lock()
+		defer b.mu.Unlock()
 		_, exists := b.cachedTxs[tx.Hash()]
 		if !exists {
 			b.cachedTxs[tx.Hash()] = tx
@@ -299,6 +302,10 @@ func (b *mockBackendWithConfirmationDelay) MineAll() {
 	}
 }
 
+func (b *mockBackendWithConfirmationDelay) BlobBaseFee(ctx context.Context) (*big.Int, error) {
+	return big.NewInt(0), nil
+}
+
 // Simple test that we can call q.Send() up to the maxPending limit without blocking.
 func TestQueue_Send_MaxPendingMetrics(t *testing.T) {
 	maxPending := 5
@@ -309,8 +316,6 @@ func TestQueue_Send_MaxPendingMetrics(t *testing.T) {
 	metrics := metrics.FakeTxMetrics{}
 	conf := configWithNumConfs(1)
 	conf.Backend = backend
-	conf.NetworkTimeout = 1 * time.Second
-	conf.ChainID = big.NewInt(1)
 	mgr, err := NewSimpleTxManagerFromConfig("TEST", testlog.Logger(t, log.LevelDebug), &metrics, conf)
 	require.NoError(t, err)
 

@@ -27,7 +27,7 @@ func TestGenerateProof(t *testing.T) {
 	tempDir := t.TempDir()
 	dir := filepath.Join(tempDir, "gameDir")
 	cfg := Config{
-		VmType:       "test",
+		VmType:       7248992,
 		L1:           "http://localhost:8888",
 		L1Beacon:     "http://localhost:9000",
 		L2s:          []string{"http://localhost:9999", "http://localhost:9999/two"},
@@ -62,7 +62,7 @@ func TestGenerateProof(t *testing.T) {
 		cfg.DebugInfo = true
 		_, _, args := captureExec(t, dir, cfg, inputs, info, math.MaxUint64, m)
 		// stop-at would need to be one more than the proof step which would overflow back to 0
-		// so expect that it will be omitted. We'll ultimately want asterisc to execute until the program exits.
+		// so expect that it will be omitted. We'll ultimately want the vm to execute until the program exits.
 		require.NotContains(t, args, "--stop-at")
 		validateMetrics(t, m, info, cfg)
 	})
@@ -229,19 +229,24 @@ func newMetrics() *capturingVmMetrics {
 }
 
 type capturingVmMetrics struct {
-	executionTimeRecordCount int
-	memoryUsed               hexutil.Uint64
-	steps                    uint64
-	rmwSuccessCount          uint64
-	rmwFailCount             uint64
-	maxStepsBetweenLLAndSC   uint64
-	reservationInvalidations uint64
-	forcedPreemptions        uint64
-	idleStepsThread0         uint64
+	executionTimeRecordCount  int
+	memoryUsed                hexutil.Uint64
+	steps                     uint64
+	instructionCacheMissCount uint64
+	rmwSuccessCount           uint64
+	rmwFailCount              uint64
+	maxStepsBetweenLLAndSC    uint64
+	reservationInvalidations  uint64
+	forcedPreemptions         uint64
+	idleStepsThread0          uint64
 }
 
 func (c *capturingVmMetrics) RecordSteps(val uint64) {
 	c.steps = val
+}
+
+func (c *capturingVmMetrics) RecordInstructionCacheMissCount(val uint64) {
+	c.instructionCacheMissCount = val
 }
 
 func (c *capturingVmMetrics) RecordExecutionTime(t time.Duration) {

@@ -117,6 +117,9 @@ type Host struct {
 	// useCreate2Deployer uses the Create2Deployer for broadcasted
 	// create2 calls.
 	useCreate2Deployer bool
+
+	// noMaxCodeSize disables the maximum contract bytecode size check.
+	noMaxCodeSize bool
 }
 
 type HostOption func(h *Host)
@@ -158,6 +161,15 @@ func WithIsolatedBroadcasts() HostOption {
 func WithCreate2Deployer() HostOption {
 	return func(h *Host) {
 		h.useCreate2Deployer = true
+	}
+}
+
+// WithNoMaxCodeSize disables the maximum contract bytecode size check.
+// This is useful for development environments where contracts may be compiled
+// without optimizations and exceed the standard 24KB limit.
+func WithNoMaxCodeSize() HostOption {
+	return func(h *Host) {
+		h.noMaxCodeSize = true
 	}
 }
 
@@ -298,6 +310,11 @@ func NewHost(
 	h.env = WrapEVM(vm.NewEVM(blockContext, h.state, h.chainCfg, vmCfg))
 	h.env.SetTxContext(txContext)
 
+	// Apply noMaxCodeSize after EVM is initialized
+	if h.noMaxCodeSize {
+		h.EnforceMaxCodeSize(false)
+	}
+
 	return h
 }
 
@@ -323,7 +340,7 @@ func (h *Host) EnableCheats() error {
 	// Solidity does EXTCODESIZE checks on functions without return-data.
 	// We need to insert some placeholder code to prevent it from aborting calls.
 	// Emulates Forge script: https://github.com/foundry-rs/foundry/blob/224fe9cbf76084c176dabf7d3b2edab5df1ab818/crates/evm/evm/src/executors/mod.rs#L108
-	h.state.SetCode(addresses.VMAddr, []byte{0x00})
+	h.state.SetCode(addresses.VMAddr, []byte{0x00}, tracing.CodeChangeUnspecified)
 	h.precompiles[addresses.VMAddr] = h.cheatcodes
 
 	consolePrecompile, err := NewPrecompile[*ConsolePrecompile](&ConsolePrecompile{
@@ -358,6 +375,7 @@ func (h *Host) Call(from common.Address, to common.Address, input []byte, gas ui
 			// an unexpected panic and we should re-raise it.
 			rStr, ok := r.(string)
 			if !ok || !strings.Contains(strings.ToLower(rStr), "revision id 1") {
+				fmt.Println("panic", rStr)
 				panic(r)
 			}
 
@@ -436,7 +454,7 @@ func (h *Host) Create(from common.Address, initCode []byte) (common.Address, err
 // Note that storage is not removed.
 func (h *Host) Wipe(addr common.Address) {
 	if h.state.GetCodeSize(addr) > 0 {
-		h.state.SetCode(addr, nil)
+		h.state.SetCode(addr, nil, tracing.CodeChangeUnspecified)
 	}
 	h.state.SetNonce(addr, 0, tracing.NonceChangeUnspecified)
 	h.state.SetBalance(addr, uint256.NewInt(0), tracing.BalanceChangeUnspecified)
@@ -452,7 +470,7 @@ func (h *Host) SetNonce(addr common.Address, nonce uint64) {
 	h.state.SetNonce(addr, nonce, tracing.NonceChangeUnspecified)
 }
 
-// GetNonce returs an account's nonce from state.
+// GetNonce returns an account's nonce from state.
 func (h *Host) GetNonce(addr common.Address) uint64 {
 	return h.state.GetNonce(addr)
 }
@@ -475,7 +493,7 @@ func (h *Host) ImportAccount(addr common.Address, account types.Account) {
 	}
 	h.state.SetBalance(addr, balance, tracing.BalanceChangeUnspecified)
 	h.state.SetNonce(addr, account.Nonce, tracing.NonceChangeUnspecified)
-	h.state.SetCode(addr, account.Code)
+	h.state.SetCode(addr, account.Code, tracing.CodeChangeUnspecified)
 	for key, value := range account.Storage {
 		h.state.SetState(addr, key, value)
 	}
@@ -505,7 +523,7 @@ func (h *Host) SetPrecompile(addr common.Address, precompile vm.PrecompiledContr
 	h.log.Debug("adding precompile", "addr", addr)
 	h.precompiles[addr] = precompile
 	// insert non-empty placeholder bytecode, so EXTCODESIZE checks pass
-	h.state.SetCode(addr, []byte{0})
+	h.state.SetCode(addr, []byte{0}, tracing.CodeChangeUnspecified)
 }
 
 // HasPrecompileOverride inspects if there exists an active precompile-override at the given address.
@@ -606,7 +624,11 @@ func (h *Host) handleRevertErr(addr common.Address, err error, revertMsg string,
 
 // onFault is a trace-hook, catches things more generic than regular EVM reverts.
 func (h *Host) onFault(pc uint64, op byte, gas, cost uint64, scope tracing.OpContext, depth int, err error) {
-	h.log.Warn("Fault", "addr", scope.Address(), "label", h.labels[scope.Address()], "err", err, "depth", depth)
+	var byte4 string
+	if len(scope.CallInput()) >= 4 {
+		byte4 = hexutil.Encode(scope.CallInput()[:4])
+	}
+	h.log.Warn("Fault", "addr", scope.Address(), "label", h.labels[scope.Address()], "err", err, "depth", depth, "op", op, "byte4", byte4)
 }
 
 // unwindCallstack is a helper to remove call-stack entries.

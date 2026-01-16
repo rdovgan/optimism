@@ -78,6 +78,10 @@ func (p *DB) Ancients() (uint64, error) {
 	panic("not supported")
 }
 
+func (p *DB) AncientBytes(kind string, id uint64, offset uint64, length uint64) ([]byte, error) {
+	panic("not supported")
+}
+
 func (p *DB) Tail() (uint64, error) {
 	panic("not supported")
 }
@@ -111,6 +115,14 @@ func (p *DB) MigrateTable(s string, f func([]byte) ([]byte, error)) error {
 }
 
 func (p *DB) AncientDatadir() (string, error) {
+	panic("not supported")
+}
+
+func (p *DB) SyncAncient() error {
+	panic("not supported")
+}
+
+func (p *DB) SyncKeyValue() error {
 	panic("not supported")
 }
 

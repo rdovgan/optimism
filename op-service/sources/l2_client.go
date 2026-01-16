@@ -3,19 +3,18 @@ package sources
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 
+	"github.com/ethereum-optimism/optimism/op-core/predeploys"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-service/apis"
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-service/predeploys"
 	"github.com/ethereum-optimism/optimism/op-service/sources/caching"
 )
 
@@ -84,7 +83,7 @@ type L2Client struct {
 	fetchWithdrawalRootFromState bool
 }
 
-var _ apis.L2EthExtendedClient = (*L2Client)(nil)
+var _ apis.L2EthClient = (*L2Client)(nil)
 
 // NewL2Client constructs a new L2Client instance. The L2Client is a thin wrapper around the EthClient with added functions
 // for fetching and caching eth.L2BlockRef values. This includes fetching an L2BlockRef by block number, label, or hash.
@@ -112,12 +111,6 @@ func (s *L2Client) RollupConfig() *rollup.Config {
 func (s *L2Client) L2BlockRefByLabel(ctx context.Context, label eth.BlockLabel) (eth.L2BlockRef, error) {
 	envelope, err := s.PayloadByLabel(ctx, label)
 	if err != nil {
-		// Both geth and erigon like to serve non-standard errors for the safe and finalized heads, correct that.
-		// This happens when the chain just started and nothing is marked as safe/finalized yet.
-		if strings.Contains(err.Error(), "block not found") || strings.Contains(err.Error(), "Unknown block") || strings.Contains(err.Error(), "unknown block") || strings.Contains(err.Error(), "header not found") {
-			err = ethereum.NotFound
-		}
-		// w%: wrap to preserve ethereum.NotFound case
 		return eth.L2BlockRef{}, fmt.Errorf("failed to determine L2BlockRef of %s, could not get payload: %w", label, err)
 	}
 	ref, err := derive.PayloadToBlockRef(s.rollupCfg, envelope.ExecutionPayload)
@@ -132,7 +125,6 @@ func (s *L2Client) L2BlockRefByLabel(ctx context.Context, label eth.BlockLabel) 
 func (s *L2Client) L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error) {
 	envelope, err := s.PayloadByNumber(ctx, num)
 	if err != nil {
-		// w%: wrap to preserve ethereum.NotFound case
 		return eth.L2BlockRef{}, fmt.Errorf("failed to determine L2BlockRef of height %v, could not get payload: %w", num, err)
 	}
 	ref, err := derive.PayloadToBlockRef(s.rollupCfg, envelope.ExecutionPayload)
@@ -152,7 +144,6 @@ func (s *L2Client) L2BlockRefByHash(ctx context.Context, hash common.Hash) (eth.
 
 	envelope, err := s.PayloadByHash(ctx, hash)
 	if err != nil {
-		// w%: wrap to preserve ethereum.NotFound case
 		return eth.L2BlockRef{}, fmt.Errorf("failed to determine block-hash of hash %v, could not get payload: %w", hash, err)
 	}
 	ref, err := derive.PayloadToBlockRef(s.rollupCfg, envelope.ExecutionPayload)
@@ -172,7 +163,6 @@ func (s *L2Client) SystemConfigByL2Hash(ctx context.Context, hash common.Hash) (
 
 	envelope, err := s.PayloadByHash(ctx, hash)
 	if err != nil {
-		// w%: wrap to preserve ethereum.NotFound case
 		return eth.SystemConfig{}, fmt.Errorf("failed to determine block-hash of hash %v, could not get payload: %w", hash, err)
 	}
 	cfg, err := derive.PayloadToSystemConfig(s.rollupCfg, envelope.ExecutionPayload)
@@ -190,6 +180,7 @@ func (s *L2Client) OutputV0AtBlockNumber(ctx context.Context, blockNum uint64) (
 	}
 	return s.outputV0(ctx, head)
 }
+
 func (s *L2Client) OutputV0AtBlock(ctx context.Context, blockHash common.Hash) (*eth.OutputV0, error) {
 	head, err := s.InfoByHash(ctx, blockHash)
 	if err != nil {

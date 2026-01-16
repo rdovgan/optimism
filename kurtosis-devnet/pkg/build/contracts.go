@@ -12,10 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
 	ktfs "github.com/ethereum-optimism/optimism/devnet-sdk/kt/fs"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/api/enclave"
+	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/util"
 	"github.com/spf13/afero"
+	"go.opentelemetry.io/otel"
 )
 
 // ContractBuilder handles building smart contracts using just commands
@@ -107,7 +110,10 @@ func NewContractBuilder(opts ...ContractBuilderOptions) *ContractBuilder {
 }
 
 // Build executes the contract build command
-func (b *ContractBuilder) Build(_ string) (string, error) {
+func (b *ContractBuilder) Build(ctx context.Context, _ string) (string, error) {
+	_, span := otel.Tracer("contract-builder").Start(ctx, "build contracts")
+	defer span.End()
+
 	// since we ignore layer for now, we can skip the build if the file already
 	// exists: it'll be the same file!
 	if url, ok := b.builtContracts[""]; ok {
@@ -174,7 +180,10 @@ func (b *ContractBuilder) buildHash() string {
 }
 
 func (b *ContractBuilder) createContractsArtifact() (name string, retErr error) {
-	ctx := context.TODO()
+	// Create context with 10-minute timeout for artifact upload operations
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
 	name = b.getBuiltContractName()
 
 	// Ensure the enclave exists
@@ -202,10 +211,13 @@ func (b *ContractBuilder) createContractsArtifact() (name string, retErr error) 
 		}
 	}
 
-	// Check if artifact already exists
-	artifactNames, err := enclaveFS.GetAllArtifactNames(ctx)
-	if err != nil {
-		log.Printf("Warning: Failed to retrieve artifact names: %v", err)
+	// Check if artifact already exists with retry logic
+	artifactNames, getAllErr := util.WithRetry(ctx, "GetAllArtifactNames", func() ([]string, error) {
+		return enclaveFS.GetAllArtifactNames(ctx)
+	})
+
+	if getAllErr != nil {
+		log.Printf("Warning: Failed to retrieve artifact names: %v", getAllErr)
 	} else {
 		for _, existingName := range artifactNames {
 			if existingName == name {
@@ -244,8 +256,11 @@ func (b *ContractBuilder) createContractsArtifact() (name string, retErr error) 
 		return "", fmt.Errorf("failed to create artifact readers: %w", err)
 	}
 
-	// Upload the artifact with all file readers
-	err = enclaveFS.PutArtifact(ctx, name, readers...)
+	// Upload the artifact with retry logic
+	_, err = util.WithRetry(ctx, fmt.Sprintf("PutArtifact(%s)", name), func() (struct{}, error) {
+		return struct{}{}, enclaveFS.PutArtifact(ctx, name, readers...)
+	})
+
 	if err != nil {
 		return "", fmt.Errorf("failed to upload artifact: %w", err)
 	}

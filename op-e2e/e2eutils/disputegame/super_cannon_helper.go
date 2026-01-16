@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-challenger/game/fault/trace/utils"
 	"github.com/ethereum-optimism/optimism/op-challenger/game/fault/trace/vm"
 	"github.com/ethereum-optimism/optimism/op-challenger/game/fault/types"
+	gameTypes "github.com/ethereum-optimism/optimism/op-challenger/game/types"
 	"github.com/ethereum-optimism/optimism/op-challenger/metrics"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/challenger"
 	"github.com/ethereum-optimism/optimism/op-service/sources/batching/rpcblock"
@@ -31,7 +32,7 @@ type SuperCannonGameHelper struct {
 	CannonHelper
 }
 
-func NewSuperCannonGameHelper(t *testing.T, client *ethclient.Client, opts *bind.TransactOpts, key *ecdsa.PrivateKey, game contracts.FaultDisputeGameContract, factoryAddr common.Address, gameAddr common.Address, provider *super.SuperTraceProvider, system DisputeSystem) *SuperCannonGameHelper {
+func NewSuperCannonGameHelper(t *testing.T, client *ethclient.Client, opts *bind.TransactOpts, key *ecdsa.PrivateKey, game contracts.FaultDisputeGameContract, factoryAddr common.Address, gameAddr common.Address, provider super.SuperTraceProvider, system DisputeSystem) *SuperCannonGameHelper {
 	superGameHelper := NewSuperGameHelper(t, require.New(t), client, opts, key, game, factoryAddr, gameAddr, provider, system)
 	defaultChallengerOptions := func() []challenger.Option {
 		return []challenger.Option{
@@ -74,6 +75,7 @@ func (g *SuperCannonGameHelper) CreateHonestActor(ctx context.Context, options .
 		vm.NewOpProgramServerExecutor(logger),
 		prestateProvider,
 		supervisorClient,
+		nil,
 		cfg.CannonAbsolutePreState,
 		dir,
 		l1Head,
@@ -126,6 +128,22 @@ func (g *SuperCannonGameHelper) ChallengeToPreimageLoad(ctx context.Context, top
 	g.splitGame.LogGameData(ctx)
 }
 
+// SupportClaimIntoTargetTraceIndex supports the specified claim while bisecting to the target trace index at split depth.
+func (g *SuperCannonGameHelper) SupportClaimIntoTargetTraceIndex(ctx context.Context, claim *ClaimHelper, targetTraceIndexAtSplitDepth uint64) {
+	provider := g.createSuperTraceProvider(ctx)
+	g.SupportClaim(ctx, claim, func(claim *ClaimHelper) *ClaimHelper {
+		if claim.IsOutputRoot(ctx) {
+			return topGameTraceBisection(g.t, ctx, claim, g.splitGame.SplitDepth(ctx), targetTraceIndexAtSplitDepth, provider)
+		} else {
+			return claim.Attack(ctx, common.Hash{0xbb})
+		}
+	}, func(parentIdx int64) {
+		g.splitGame.StepFails(ctx, parentIdx, false, []byte{}, []byte{})
+		g.splitGame.StepFails(ctx, parentIdx, true, []byte{}, []byte{})
+	})
+	g.splitGame.LogGameData(ctx)
+}
+
 func (g *SuperCannonGameHelper) createSuperCannonTraceProvider(ctx context.Context, proposal *ClaimHelper, options ...challenger.Option) *cannon.CannonTraceProviderForTest {
 	splitDepth := g.splitGame.SplitDepth(ctx)
 	g.require.EqualValues(proposal.Depth(), splitDepth+1, "outputRootClaim must be the root of an execution game")
@@ -135,15 +153,10 @@ func (g *SuperCannonGameHelper) createSuperCannonTraceProvider(ctx context.Conte
 	opt = append(opt, options...)
 	cfg := challenger.NewChallengerConfig(g.t, g.system, "", opt...)
 
-	rootProvider := g.System.SupervisorClient()
-
 	l1Head := g.GetL1Head(ctx)
-	prestateTimestamp, poststateTimestamp, err := g.Game.GetGameRange(ctx)
+	_, poststateTimestamp, err := g.Game.GetGameRange(ctx)
 	g.require.NoError(err, "Failed to load block range")
-	prestateProvider := super.NewSuperRootPrestateProvider(rootProvider, prestateTimestamp)
-	rollupCfgs, err := super.NewRollupConfigsFromParsed(g.System.RollupCfgs()...)
-	require.NoError(g.T, err, "failed to create rollup configs")
-	superProvider := super.NewSuperTraceProvider(logger, rollupCfgs, prestateProvider, rootProvider, l1Head, splitDepth, prestateTimestamp, poststateTimestamp)
+	superProvider := g.createSuperTraceProvider(ctx)
 
 	var localContext common.Hash
 	selector := split.NewSplitProviderSelector(superProvider, splitDepth, func(ctx context.Context, depth types.Depth, pre types.Claim, post types.Claim) (types.TraceProvider, error) {
@@ -158,7 +171,7 @@ func (g *SuperCannonGameHelper) createSuperCannonTraceProvider(ctx context.Conte
 		localContext = split.CreateLocalContext(pre, post)
 		dir := filepath.Join(cfg.Datadir, "super-cannon-trace")
 		subdir := filepath.Join(dir, localContext.Hex())
-		return cannon.NewTraceProviderForTest(logger, metrics.NoopMetrics.ToTypedVmMetrics(types.TraceTypeCannon.String()), cfg, localInputs, subdir, g.splitGame.MaxDepth(ctx)-splitDepth-1), nil
+		return cannon.NewTraceProviderForTest(logger, metrics.NoopMetrics.ToTypedVmMetrics(gameTypes.SuperCannonGameType.String()), cfg, localInputs, subdir, g.splitGame.MaxDepth(ctx)-splitDepth-1), nil
 	})
 
 	claims, err := g.splitGame.Game.GetAllClaims(ctx, rpcblock.Latest)
@@ -169,4 +182,43 @@ func (g *SuperCannonGameHelper) createSuperCannonTraceProvider(ctx context.Conte
 	g.require.NoError(err)
 	translatingProvider := provider.(*trace.TranslatingProvider)
 	return translatingProvider.Original().(*cannon.CannonTraceProviderForTest)
+}
+
+func (g *SuperCannonGameHelper) createSuperTraceProvider(ctx context.Context) super.SuperTraceProvider {
+	logger := testlog.Logger(g.t, log.LevelInfo).New("role", "superTraceProvider", "game", g.splitGame.Addr)
+	rootProvider := g.System.SupervisorClient()
+	splitDepth := g.splitGame.SplitDepth(ctx)
+	l1Head := g.GetL1Head(ctx)
+	prestateTimestamp, poststateTimestamp, err := g.Game.GetGameRange(ctx)
+	g.require.NoError(err, "Failed to load block range")
+	prestateProvider := super.NewSuperRootPrestateProvider(rootProvider, prestateTimestamp)
+	rollupCfgs, err := super.NewRollupConfigsFromParsed(g.System.RollupCfgs()...)
+	require.NoError(g.T, err, "failed to create rollup configs")
+	return super.NewSupervisorSuperTraceProvider(logger, rollupCfgs, prestateProvider, rootProvider, l1Head, splitDepth, prestateTimestamp, poststateTimestamp)
+}
+
+// InitFirstDerivationGame builds a top-level game whose deepest node (at splitDepth) asserts the first
+// output-root derivation that follows the prestate (timestamp=1, step<=1).
+// Returns the claim positioned at splitDepth, which is the parent of the constructed execution subgame root.
+func (g *SuperCannonGameHelper) InitFirstDerivationGame(ctx context.Context, correctTrace *OutputHonestHelper) *ClaimHelper {
+	splitDepth := g.SplitDepth(ctx)
+	g.Require.EqualValues(splitDepth, 30, "this operation assumes a specific split depth")
+	claim := g.RootClaim(ctx)
+
+	// We identify the one required right bisection that ensures that an execution game is positioned to derive the first output root
+	// This occurs at splitDepth-log(StepsPerTimestamp).
+	for {
+		if claim.Depth() == splitDepth-8 {
+			claim = correctTrace.AttackClaim(ctx, claim) // invalid attack to ensure that the honest actor bisects right
+			claim = correctTrace.DefendClaim(ctx, claim)
+		} else {
+			claim = claim.Attack(ctx, common.Hash{0x01})
+			claim = correctTrace.AttackClaim(ctx, claim)
+		}
+		g.LogGameData(ctx)
+		if claim.Depth() == splitDepth {
+			break
+		}
+	}
+	return claim
 }

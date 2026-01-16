@@ -31,7 +31,7 @@ func TestL2Sequencer_SequencerDrift(gt *testing.T) {
 		SequencerWindowSize: 24,
 		ChannelTimeout:      20,
 		L1BlockTime:         12,
-		AllocType:           config.AllocTypeStandard,
+		AllocType:           config.DefaultAllocType,
 	}
 	dp := e2eutils.MakeDeployParams(t, p)
 	sd := e2eutils.Setup(t, dp, helpers.DefaultAlloc)
@@ -180,7 +180,7 @@ func TestL2SequencerAPI(gt *testing.T) {
 	l2Cl := seqEng.EngineClient(t, cfg)
 
 	// Prepare a block
-	fb := derive.NewFetchingAttributesBuilder(cfg, l1Cl, l2Cl)
+	fb := derive.NewFetchingAttributesBuilder(cfg, sd.L1Cfg.Config, sd.DependencySet, l1Cl, l2Cl)
 	parent, err := l2Cl.L2BlockRefByLabel(t.Ctx(), eth.Unsafe)
 	require.NoError(t, err)
 	l1Origin := parent.L1Origin // repeat the L1 origin

@@ -11,7 +11,12 @@ import (
 
 type PortMap map[string]*descriptors.PortInfo
 
-type ServiceMap map[string]PortMap
+type Service struct {
+	Labels map[string]string
+	Ports  PortMap
+}
+
+type ServiceMap map[string]*Service
 
 // InspectData represents a summary of the output of "kurtosis enclave inspect"
 type InspectData struct {
@@ -25,6 +30,14 @@ type Inspector struct {
 
 func NewInspector(enclaveID string) *Inspector {
 	return &Inspector{enclaveID: enclaveID}
+}
+
+func ShortenedUUIDString(fullUUID string) string {
+	lengthToTrim := 12
+	if lengthToTrim > len(fullUUID) {
+		lengthToTrim = len(fullUUID)
+	}
+	return fullUUID[:lengthToTrim]
 }
 
 func (e *Inspector) ExtractData(ctx context.Context) (*InspectData, error) {
@@ -75,14 +88,15 @@ func (e *Inspector) ExtractData(ctx context.Context) (*InspectData, error) {
 				Port: int(portSpec.GetNumber()),
 			}
 		}
-
+		shortEnclaveUuid := ShortenedUUIDString(enclaveUUID)
+		shortServiceUuid := ShortenedUUIDString(svcUUID)
 		for port, portSpec := range svcCtx.GetPrivatePorts() {
 			// avoid non-mapped ports, we shouldn't have to use them.
 			if p, ok := portMap[port]; ok {
 				p.PrivatePort = int(portSpec.GetNumber())
 				p.ReverseProxyHeader = http.Header{
 					// This allows going through the kurtosis reverse proxy for each port
-					"Host": []string{fmt.Sprintf("%d-%.12s-%.12s", p.PrivatePort, svcUUID, enclaveUUID)},
+					"Host": []string{fmt.Sprintf("%d-%s-%s", p.PrivatePort, shortServiceUuid, shortEnclaveUuid)},
 				}
 
 				portMap[port] = p
@@ -90,7 +104,10 @@ func (e *Inspector) ExtractData(ctx context.Context) (*InspectData, error) {
 		}
 
 		if len(portMap) != 0 {
-			data.UserServices[svc] = portMap
+			data.UserServices[svc] = &Service{
+				Ports:  portMap,
+				Labels: svcCtx.GetLabels(),
+			}
 		}
 
 	}
